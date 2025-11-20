@@ -145,7 +145,7 @@ const Home = () => {
               mb: 1
             }}
           >
-            STANZO POS
+            DEMO POS
           </Typography>
           <Typography 
             variant="h6" 
@@ -377,7 +377,8 @@ const Home = () => {
             {/* Footer Note */}
             <Box sx={{ mt: 2, textAlign: 'center' }}>
               <Typography variant="caption" sx={{ color: alpha('#fff', 0.6) }}>
-                Need help? Contact system administrator
+        Fusion XE POS: Streamlining Your Business.
+ Developed by Stancylus Kalong'o | Contact: 0746919850
               </Typography>
             </Box>
           </Box>
@@ -388,3 +389,11 @@ const Home = () => {
 };
 
 export default Home;
+
+// Powerful, Easy-to-Use Point of Sale Systems.
+// Custom Developed by Fusion XE | 0111999685
+
+
+
+//   Fusion XE POS: Streamlining Your Business.
+// Developed by Stancylus Kalong'o | Contact: 0746919850

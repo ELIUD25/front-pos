@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Card,
   Table,
@@ -51,6 +51,13 @@ const { Title, Text } = Typography;
 const { Option } = Select;
 const { Search } = Input;
 
+// Cache for API responses
+const apiCache = {
+  shops: null,
+  credits: null,
+  lastFetch: null
+};
+
 const CreditManagement = ({ currentUser, shops: initialShops = [], onPaymentSuccess }) => {
   const [credits, setCredits] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -66,50 +73,67 @@ const CreditManagement = ({ currentUser, shops: initialShops = [], onPaymentSucc
   const [paymentHistory, setPaymentHistory] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
-  const [retryCount, setRetryCount] = useState(0);
-  const [lastFetchTime, setLastFetchTime] = useState(null);
-
-  // Safe current user access
-  // Safe current user access
-const getCurrentUser = useCallback(() => {
-  // Try to get actual user data from localStorage or props
-  try {
-    const storedUser = localStorage.getItem('cashierData') || localStorage.getItem('userData');
-    if (storedUser) {
-      const parsedUser = JSON.parse(storedUser);
-      if (parsedUser && parsedUser._id && parsedUser._id !== 'unknown-user') {
-        return parsedUser;
-      }
-    }
-  } catch (error) {
-    console.error('Error parsing stored user data:', error);
-  }
   
-  // Fallback to props or minimal user object
-  return currentUser || { 
-    _id: null, // Use null instead of invalid string
-    name: 'System', 
-    role: 'user' 
-  };
-}, [currentUser]);
+  // Refs for tracking
+  const isInitialMount = useRef(true);
+  const apiCallTimeoutRef = useRef(null);
+  const lastFetchTimeRef = useRef(null);
+  const retryCountRef = useRef(0);
 
+  // Safe current user access
+  const getCurrentUser = useCallback(() => {
+    try {
+      const storedUser = localStorage.getItem('cashierData') || localStorage.getItem('userData');
+      if (storedUser) {
+        const parsedUser = JSON.parse(storedUser);
+        if (parsedUser && parsedUser._id && parsedUser._id !== 'unknown-user') {
+          return parsedUser;
+        }
+      }
+    } catch (error) {
+      console.error('Error parsing stored user data:', error);
+    }
+    
+    return currentUser || { 
+      _id: null,
+      name: 'System', 
+      role: 'user' 
+    };
+  }, [currentUser]);
 
-  // Initialize shops - use props or fetch if not provided
+  // Initialize shops with caching
   useEffect(() => {
     const initializeShops = async () => {
+      // Use cached shops if available and less than 5 minutes old
+      if (apiCache.shops && apiCache.lastFetch && (Date.now() - apiCache.lastFetch < 300000)) {
+        console.log('🔄 Using cached shops data');
+        setShops(apiCache.shops);
+        return;
+      }
+
+      // If we have initial shops from props, use them
       if (initialShops && initialShops.length > 0) {
         setShops(initialShops);
-      } else {
-        try {
-          console.log('🔄 Initializing shops...');
-          const shopsResponse = await shopAPI.getAll();
-          const shopsData = Array.isArray(shopsResponse?.data) ? shopsResponse.data : 
-                           Array.isArray(shopsResponse) ? shopsResponse : [];
-          setShops(shopsData);
-          console.log('✅ Shops initialized:', shopsData.length);
-        } catch (error) {
-          console.error('Error fetching shops:', error);
-          setShops([]);
+        apiCache.shops = initialShops;
+        apiCache.lastFetch = Date.now();
+        return;
+      }
+
+      try {
+        console.log('🔄 Fetching shops...');
+        const shopsResponse = await shopAPI.getAll();
+        const shopsData = Array.isArray(shopsResponse?.data) ? shopsResponse.data : 
+                         Array.isArray(shopsResponse) ? shopsResponse : [];
+        
+        setShops(shopsData);
+        apiCache.shops = shopsData;
+        apiCache.lastFetch = Date.now();
+        console.log('✅ Shops initialized:', shopsData.length);
+      } catch (error) {
+        console.error('Error fetching shops:', error);
+        // Use cached data if available, even if stale
+        if (apiCache.shops) {
+          setShops(apiCache.shops);
         }
       }
     };
@@ -117,8 +141,8 @@ const getCurrentUser = useCallback(() => {
     initializeShops();
   }, [initialShops]);
 
-  // Calculate credit status based on balance and due date
-  const calculateCreditStatus = (credit, balanceDue) => {
+  // Calculate credit status
+  const calculateCreditStatus = useCallback((credit, balanceDue) => {
     if (balanceDue <= 0) {
       return 'paid';
     }
@@ -132,10 +156,10 @@ const getCurrentUser = useCallback(() => {
     }
     
     return 'pending';
-  };
+  }, []);
 
-  // Check for credits due in 2 days and send notifications
-  const checkDueSoonCredits = (creditsData) => {
+  // Check for credits due in 2 days
+  const checkDueSoonCredits = useCallback((creditsData) => {
     if (!Array.isArray(creditsData)) {
       setDueSoonCredits([]);
       return;
@@ -172,142 +196,30 @@ const getCurrentUser = useCallback(() => {
         ),
       });
     }
-  };
+  }, [getCurrentUser]);
 
-  // FIXED: Enhanced credit payment handler with proper server-aligned structure
-// ULTRA SIMPLIFIED: Credit payment handler with minimal required fields
-const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
-  try {
-    if (!credit || !credit._id) {
-      throw new Error('Invalid credit record');
-    }
-
-    const user = getCurrentUser();
-    
-    // Enhanced validation
-    if (!paymentAmount || paymentAmount <= 0) {
-      throw new Error('Invalid payment amount');
-    }
-
-    if (!paymentMethod) {
-      throw new Error('Payment method is required');
-    }
-
-    // Validate payment doesn't exceed balance
-    const balanceDue = Number(credit.balanceDue) || 0;
-    if (paymentAmount > balanceDue) {
-      throw new Error(`Payment amount (${formatCurrency(paymentAmount)}) exceeds balance due (${formatCurrency(balanceDue)})`);
-    }
-
-    console.log('💰 Processing credit payment:', {
-      creditId: credit._id,
-      customer: credit.customerName,
-      paymentAmount,
-      paymentMethod,
-      balanceDue
-    });
-
-    // Get shop details for proper population
-    const shopDetails = shopUtils.getShopDetails(credit.shopId, shops);
-    const shopName = shopDetails?.name || credit.shopName || 'Unknown Shop';
-
-    // ULTRA SIMPLIFIED: Only include absolutely essential fields
-    const paymentTransactionData = {
-      // Core required fields only
-      transactionNumber: `PAY-${Date.now().toString().slice(-8)}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`,
-      totalAmount: Number(paymentAmount),
-      paymentMethod: paymentMethod,
-      customerName: credit.customerName || 'Unknown Customer',
-      
-      // Shop information as string only
-      shopName: shopName,
-      
-      // Cashier information as string only - NO cashierId to avoid ObjectId issues
-      cashierName: user.name || 'System',
-      
-      // Date field
-      saleDate: new Date().toISOString(),
-      
-      // Credit payment marker
-      isCreditPayment: true,
-      originalCreditId: credit._id,
-      
-      // Status
-      status: 'completed',
-      
-      // Minimal items array
-      items: [{
-        productName: `Credit Payment - ${credit.customerName}`,
-        quantity: 1,
-        price: Number(paymentAmount),
-        totalPrice: Number(paymentAmount)
-      }],
-      
-      // Notes for identification
-      notes: `Credit payment for ${credit.customerName}`
-    };
-
-    console.log('📤 Sending ULTRA SIMPLIFIED payment transaction data:', paymentTransactionData);
-
-    console.log('🔄 Creating payment transaction via transactionAPI...');
-    const response = await transactionAPI.create(paymentTransactionData);
-    
-    if (response && (response.success || response.data || response._id)) {
-      console.log('✅ Credit payment transaction created successfully:', {
-        transactionId: response._id || response.data?._id || response.transactionId,
-        amount: paymentAmount,
-        creditId: credit._id
-      });
-
-      notification.success({
-        message: 'Credit Payment Recorded',
-        description: `Payment of ${formatCurrency(paymentAmount)} recorded and added to revenue.`,
-      });
-      
-      // Refresh credits and transactions to show updated balances
-      fetchCredits();
-      if (onPaymentSuccess) {
-        onPaymentSuccess();
-      }
-      
-      return true;
-    } else {
-      throw new Error(response?.message || 'Failed to create payment transaction');
-    }
-  } catch (error) {
-    console.error('❌ ERROR processing credit payment:', error);
-    
-    let userMessage = 'Payment failed due to server validation error';
-    
-    if (error.response?.status === 500) {
-      const serverError = error.response?.data;
-      console.error('🔍 Server error details:', serverError);
-      userMessage = serverError?.error || serverError?.message || 'Server error while processing payment';
-    } else if (error.response?.status === 400) {
-      userMessage = error.response?.data?.message || 'Invalid payment data provided';
-    } else if (error.message) {
-      userMessage = error.message;
-    }
-    
-    notification.error({
-      message: 'Payment Failed',
-      description: userMessage,
-      duration: 8,
-    });
-    
-    throw error;
-  }
-};
-
-
-
-  // Enhanced credit fetching with timeout prevention and retry logic
-  const fetchCredits = useCallback(async (isRetry = false) => {
-    // Prevent too frequent API calls
+  // Optimized credit fetching with better caching and throttling
+  const fetchCredits = useCallback(async (forceRefresh = false) => {
+    // Prevent too frequent API calls (minimum 15 seconds between calls)
     const now = Date.now();
-    if (lastFetchTime && (now - lastFetchTime < 5000) && !isRetry) {
+    if (lastFetchTimeRef.current && (now - lastFetchTimeRef.current < 15000) && !forceRefresh) {
       console.log('⏳ Skipping fetch - too soon since last call');
       return;
+    }
+
+    // Use cached data if available and not forcing refresh
+    if (apiCache.credits && !forceRefresh && apiCache.lastFetch && (now - apiCache.lastFetch < 60000)) {
+      console.log('🔄 Using cached credits data');
+      setCredits(apiCache.credits);
+      
+      // Still check for due soon credits with cached data
+      checkDueSoonCredits(apiCache.credits);
+      return;
+    }
+
+    // Clear any existing timeout
+    if (apiCallTimeoutRef.current) {
+      clearTimeout(apiCallTimeoutRef.current);
     }
 
     setLoading(true);
@@ -323,33 +235,24 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
         params.shopId = selectedShop;
       }
       
-      console.log('📋 Fetching credits with optimized params:', params);
+      console.log('📋 Fetching credits with params:', params);
       
-      // Add timeout handling at component level
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Request timeout after 25s')), 25000)
-      );
+      const response = await creditAPI.getAll(params);
       
-      const fetchPromise = creditAPI.getAll(params);
-      
-      const response = await Promise.race([fetchPromise, timeoutPromise]);
-      
-      // Ensure credits is always an array and calculate proper balance due
+      // Process credits data
       const creditsData = Array.isArray(response?.data) ? response.data : [];
       
       console.log('✅ Raw credits data received:', creditsData.length, 'items');
       
-      // Remove duplicate credits based on transaction ID
+      // Remove duplicate credits
       const uniqueCreditsMap = new Map();
       creditsData.forEach(credit => {
         let transactionId = credit.transactionId;
         
-        // Handle case where transactionId might be an object
         if (transactionId && typeof transactionId === 'object') {
           transactionId = transactionId._id || transactionId.id || transactionId.transactionId;
         }
         
-        // Use transactionId as key to prevent duplicates
         const key = transactionId || credit._id;
         if (!uniqueCreditsMap.has(key)) {
           uniqueCreditsMap.set(key, {
@@ -361,9 +264,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
       
       const uniqueCredits = Array.from(uniqueCreditsMap.values());
       
-      console.log('🔄 Processing credits without transaction details to prevent 404 errors');
-      
-      // Process credits WITHOUT fetching transaction details to prevent 404 errors
+      // Process credits
       const creditsWithDetails = uniqueCredits.map((credit) => {
         const totalAmount = Number(credit.totalAmount) || 0;
         const amountPaid = Number(credit.amountPaid) || 0;
@@ -372,7 +273,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
         // Enhance credit with shop information
         const shopInfo = shopUtils.getShopDetails(credit.shopId, shops);
         
-        // Skip transaction details fetching to prevent 404 errors
         let transactionDetails = null;
         let transactionId = credit.transactionId;
         
@@ -383,7 +283,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
             saleDate: credit.saleDate || credit.createdAt,
             totalAmount: totalAmount,
             items: credit.items || [],
-            // Use available data from credit record
             customerName: credit.customerName,
             customerPhone: credit.customerPhone,
             cashierName: credit.cashierName,
@@ -400,14 +299,17 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
           shopName: shopInfo?.name || 'Unknown Shop',
           shopType: shopInfo?.type || 'Unknown',
           transactionDetails,
-          // Update status based on calculated balance
           status: calculateCreditStatus(credit, balanceDue)
         };
       });
       
       setCredits(creditsWithDetails);
-      setRetryCount(0);
-      setLastFetchTime(Date.now());
+      
+      // Update cache
+      apiCache.credits = creditsWithDetails;
+      apiCache.lastFetch = Date.now();
+      lastFetchTimeRef.current = Date.now();
+      retryCountRef.current = 0;
       
       // Check for credits due in 2 days
       checkDueSoonCredits(creditsWithDetails);
@@ -416,52 +318,36 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
     } catch (error) {
       console.error('Error fetching credits:', error);
       
-      // Enhanced error handling with specific messages
-      let errorMessage = 'Failed to load credits';
-      let shouldRetry = false;
-      
-      if (error.message?.includes('timeout') || error.code === 'ECONNABORTED') {
-        errorMessage = 'Request timeout. The server is taking too long to respond.';
-        shouldRetry = retryCount < 3;
-      } else if (error.response?.status === 404) {
-        errorMessage = 'Credits endpoint not found. Please check if the backend server is running.';
-      } else if (error.response?.status === 500) {
-        errorMessage = 'Server error while loading credits. Please try again.';
-        shouldRetry = retryCount < 2;
-      } else if (error.response?.status === 429) {
-        errorMessage = 'Too many requests. Please wait a moment and try again.';
-        shouldRetry = true;
+      // Use cached data if available
+      if (apiCache.credits) {
+        console.log('🔄 Falling back to cached credits due to error');
+        setCredits(apiCache.credits);
       } else {
-        errorMessage = error.response?.data?.message || error.message || errorMessage;
-      }
-      
-      // Show appropriate notification
-      if (shouldRetry && retryCount < 3) {
-        const nextRetry = retryCount + 1;
-        setRetryCount(nextRetry);
-        
-        notification.warning({
-          message: `Retrying credit fetch (${nextRetry}/3)`,
-          description: 'Server is slow to respond. Trying again...',
-          duration: 3,
-        });
-        
-        // Retry after delay
-        setTimeout(() => fetchCredits(true), 2000 * nextRetry);
-      } else {
-        notification.error({
-          message: 'Failed to load credits',
-          description: errorMessage,
-          duration: 5,
-        });
-        
-        // Set empty credits array to prevent UI issues
         setCredits([]);
       }
+      
+      let errorMessage = 'Failed to load credits';
+      
+      if (error.response?.status === 429) {
+        errorMessage = 'Too many requests. Please wait a moment and try again.';
+        // Don't retry on 429, wait longer
+        lastFetchTimeRef.current = Date.now() + 30000; // Wait 30 seconds before next attempt
+      } else if (error.message?.includes('timeout')) {
+        errorMessage = 'Request timeout. The server is taking too long to respond.';
+      } else if (error.response?.status === 500) {
+        errorMessage = 'Server error while loading credits. Please try again.';
+      }
+      
+      notification.error({
+        message: 'Failed to load credits',
+        description: errorMessage,
+        duration: 5,
+      });
     } finally {
       setLoading(false);
+      isInitialMount.current = false;
     }
-  }, [selectedShop, statusFilter, shops, getCurrentUser, retryCount, lastFetchTime]);
+  }, [selectedShop, statusFilter, shops, calculateCreditStatus, checkDueSoonCredits]);
 
   // Fetch payment history for a credit
   const fetchPaymentHistory = async (creditId) => {
@@ -474,7 +360,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
       const response = await creditAPI.getPaymentHistory(creditId);
       const history = Array.isArray(response?.data) ? response.data : [];
       
-      // Ensure payment history data is properly formatted for rendering
       const formattedHistory = history.map(payment => ({
         ...payment,
         paymentDate: payment.paymentDate || payment.createdAt,
@@ -517,7 +402,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
     return filtered;
   };
 
-  // Unified credit stats calculation using CalculationUtils
+  // Unified credit stats calculation
   const calculateStats = () => {
     const filteredCredits = getFilteredCredits();
     
@@ -525,7 +410,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
       return CalculationUtils.getDefaultStatsWithCreditManagement();
     }
 
-    // Use the same calculation as other components
     const totalCreditSales = filteredCredits.reduce((sum, credit) => 
       sum + CalculationUtils.safeNumber(credit.totalAmount), 0
     );
@@ -555,7 +439,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
     };
   };
 
-  // Handle credit payment with immediate balance update and revenue recognition
+  // Handle credit payment
   const handlePayment = async (values) => {
     try {
       if (!selectedCredit || !selectedCredit._id) {
@@ -567,59 +451,218 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
       }
 
       const paymentAmount = Number(values.amount) || 0;
-      const currentAmountPaid = Number(selectedCredit.amountPaid) || 0;
-      const newAmountPaid = currentAmountPaid + paymentAmount;
-      const totalAmount = Number(selectedCredit.totalAmount) || 0;
-      const newBalanceDue = Math.max(0, totalAmount - newAmountPaid);
 
-      // Use the enhanced credit payment handler to create revenue transaction
+      // Use the unified credit payment handler
       await handleCreditPayment(selectedCredit, paymentAmount, values.paymentMethod);
-
-      // Update credit record with new payment details
-      const user = getCurrentUser();
-      const paymentData = {
-        amount: paymentAmount,
-        paymentMethod: values.paymentMethod,
-        recordedBy: user.name,
-        cashierName: user.name,
-        amountPaid: newAmountPaid,
-        balanceDue: newBalanceDue,
-        status: newBalanceDue <= 0 ? 'paid' : 
-                newAmountPaid > 0 ? 'partially_paid' : 'pending'
-      };
-
-      // Update credit record in database
-      await creditAPI.patchPayment(selectedCredit._id, paymentData);
-      
-      // Update local state to reflect changes
-      setCredits(prevCredits => 
-        prevCredits.map(credit => 
-          credit._id === selectedCredit._id 
-            ? {
-                ...credit,
-                amountPaid: newAmountPaid,
-                balanceDue: newBalanceDue,
-                status: newBalanceDue <= 0 ? 'paid' : 
-                       newAmountPaid > 0 ? 'partially_paid' : 'pending'
-              }
-            : credit
-        )
-      );
       
       setPaymentModalVisible(false);
       setSelectedCredit(null);
       paymentForm.resetFields();
       
-      // Optional: Refresh to ensure consistency
-      setTimeout(() => fetchCredits(), 500);
-      
     } catch (error) {
       console.error('Error recording payment:', error);
-      // Error notification is already handled in handleCreditPayment
     }
   };
 
-  // Handle update credit record (shop and cashier assignment)
+  // UPDATED: Unified credit payment handler with proper upfront payment alignment
+  const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
+    try {
+      if (!credit || !credit._id) {
+        throw new Error('Invalid credit record');
+      }
+
+      const user = getCurrentUser();
+      
+      // Enhanced validation
+      if (!paymentAmount || paymentAmount <= 0) {
+        throw new Error('Invalid payment amount');
+      }
+
+      if (!paymentMethod) {
+        throw new Error('Payment method is required');
+      }
+
+      // Validate payment doesn't exceed balance
+      const balanceDue = Number(credit.balanceDue) || 0;
+      if (paymentAmount > balanceDue) {
+        throw new Error(`Payment amount (${formatCurrency(paymentAmount)}) exceeds balance due (${formatCurrency(balanceDue)})`);
+      }
+
+      console.log('💰 Processing credit payment with upfront payment alignment:', {
+        creditId: credit._id,
+        customer: credit.customerName,
+        paymentAmount,
+        paymentMethod,
+        balanceDue,
+        originalTotal: credit.totalAmount
+      });
+
+      // Get shop details
+      const shopDetails = shopUtils.getShopDetails(credit.shopId, shops);
+      const shopName = shopDetails?.name || credit.shopName || 'Unknown Shop';
+
+      // Create payment transaction data aligned with server expectations
+      const paymentTransactionData = {
+        transactionNumber: `PAY-${Date.now().toString().slice(-8)}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`,
+        totalAmount: Number(paymentAmount),
+        paymentMethod: paymentMethod,
+        customerName: credit.customerName || 'Unknown Customer',
+        shopName: shopName,
+        shopId: credit.shopId,
+        cashierId: user._id,
+        cashierName: user.name || 'System',
+        saleDate: new Date().toISOString(),
+        isCreditPayment: true,
+        originalCreditId: credit._id,
+        status: 'completed',
+        items: [{
+          productName: `Credit Payment - ${credit.customerName}`,
+          quantity: 1,
+          price: Number(paymentAmount),
+          totalPrice: Number(paymentAmount)
+        }],
+        notes: `Credit payment for ${credit.customerName}`,
+        
+        // UPDATED: Align with server upfront payment structure
+        recognizedRevenue: Number(paymentAmount),
+        immediateRevenue: Number(paymentAmount),
+        amountPaid: Number(paymentAmount),
+        outstandingRevenue: 0,
+        isCreditTransaction: false,
+        
+        // UPDATED: Enhanced payment split for proper dashboard display
+        paymentSplit: {
+          cash: paymentMethod === 'cash' ? Number(paymentAmount) : 0,
+          bank_mpesa: ['mpesa', 'bank', 'card', 'bank_mpesa'].includes(paymentMethod) ? Number(paymentAmount) : 0,
+          credit: 0
+        }
+      };
+
+      console.log('📤 Sending aligned payment transaction data:', paymentTransactionData);
+
+      // Create payment transaction
+      const response = await transactionAPI.create(paymentTransactionData);
+      
+      let success = false;
+      let transactionId = null;
+
+      console.log('📥 Raw API Response:', response);
+
+      // Check various possible success response structures
+      if (response) {
+        if (response.success === true) {
+          success = true;
+          if (response.data) {
+            if (response.data._id) {
+              transactionId = response.data._id;
+            } else if (response.data.paymentTransaction && response.data.paymentTransaction._id) {
+              transactionId = response.data.paymentTransaction._id;
+            }
+          }
+        }
+        else if (response._id) {
+          success = true;
+          transactionId = response._id;
+        }
+        else if (response.paymentTransaction && response.paymentTransaction._id) {
+          success = true;
+          transactionId = response.paymentTransaction._id;
+        }
+        else if (response.data && (response.data._id || response.data.success)) {
+          success = true;
+          transactionId = response.data._id;
+        }
+        else if (response && typeof response === 'object') {
+          success = true;
+          console.log('ℹ️  Response received but no clear success indicator, assuming success:', response);
+        }
+      }
+
+      if (success) {
+        console.log('✅ Credit payment transaction created successfully:', {
+          transactionId,
+          amount: paymentAmount,
+          creditId: credit._id,
+          responseStructure: Object.keys(response || {})
+        });
+
+        // UPDATED: Update the credit record to reflect the payment
+        try {
+          const updatedAmountPaid = (Number(credit.amountPaid) || 0) + Number(paymentAmount);
+          const updatedBalanceDue = Math.max(0, (Number(credit.totalAmount) || 0) - updatedAmountPaid);
+          
+          const creditUpdateData = {
+            amountPaid: updatedAmountPaid,
+            balanceDue: updatedBalanceDue,
+            status: updatedBalanceDue <= 0 ? 'paid' : (updatedAmountPaid > 0 ? 'partially_paid' : 'pending')
+          };
+
+          // Add to payment history
+          if (!credit.paymentHistory) {
+            creditUpdateData.paymentHistory = [];
+          }
+          
+          creditUpdateData.paymentHistory.push({
+            amount: Number(paymentAmount),
+            paymentDate: new Date().toISOString(),
+            paymentMethod: paymentMethod,
+            recordedBy: user.name || 'System',
+            cashierName: user.name || 'System',
+            notes: `Payment recorded via Credit Management`
+          });
+
+          await creditAPI.update(credit._id, creditUpdateData);
+          console.log('✅ Credit record updated with payment');
+          
+        } catch (updateError) {
+          console.error('⚠️ Could not update credit record, but payment was recorded:', updateError);
+          // Continue since the payment transaction was successful
+        }
+
+        notification.success({
+          message: 'Credit Payment Recorded',
+          description: `Payment of ${formatCurrency(paymentAmount)} recorded successfully.`,
+        });
+        
+        // Refresh credits to show updated balances
+        fetchCredits(true); // Force refresh
+        if (onPaymentSuccess) {
+          onPaymentSuccess();
+        }
+        
+        return true;
+      } else {
+        console.error('❌ Unexpected response structure:', response);
+        throw new Error(response?.message || 'Unexpected response from server');
+      }
+    } catch (error) {
+      console.error('❌ ERROR processing credit payment:', error);
+      
+      let userMessage = 'Payment failed due to server error';
+      
+      if (error.response?.status === 500) {
+        const serverError = error.response?.data;
+        console.error('🔍 Server error details:', serverError);
+        userMessage = serverError?.error || serverError?.message || 'Server error while processing payment';
+      } else if (error.response?.status === 400) {
+        userMessage = error.response?.data?.message || 'Invalid payment data provided';
+      } else if (error.response?.status === 404) {
+        userMessage = 'Payment service unavailable. Please try again.';
+      } else if (error.message) {
+        userMessage = error.message;
+      }
+      
+      notification.error({
+        message: 'Payment Failed',
+        description: userMessage,
+        duration: 8,
+      });
+      
+      throw error;
+    }
+  };
+
+  // Handle update credit record
   const handleUpdateCredit = async (values) => {
     try {
       if (!selectedCredit || !selectedCredit._id) {
@@ -636,7 +679,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
         customerName: values.customerName,
         customerPhone: values.customerPhone,
         dueDate: values.dueDate,
-        // Add shop classification fields
         creditShopName: values.shopName,
         creditShopId: values.shopId,
         shopClassification: values.shopName
@@ -652,7 +694,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
       setEditModalVisible(false);
       setSelectedCredit(null);
       editForm.resetFields();
-      fetchCredits();
+      fetchCredits(true); // Force refresh after update
     } catch (error) {
       console.error('Error updating credit:', error);
       notification.error({
@@ -680,7 +722,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
         description: 'Credit record has been deleted successfully.'
       });
 
-      fetchCredits();
+      fetchCredits(true); // Force refresh after delete
     } catch (error) {
       console.error('Error deleting credit:', error);
       notification.error({
@@ -741,7 +783,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
     setEditModalVisible(true);
   };
 
-  // Enhanced columns with proper transaction ID handling and safe rendering
+  // Enhanced columns with proper transaction ID handling
   const columns = [
     {
       title: 'Customer',
@@ -810,63 +852,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
           )}
         </Space>
       )
-    },
-    {
-      title: 'Transaction',
-      dataIndex: 'transactionId',
-      key: 'transactionId',
-      width: 120,
-      render: (transactionId, record) => {
-        // Ensure transactionId is a string for rendering
-        const safeTransactionId = String(transactionId || record.transactionNumber || 'N/A');
-        
-        return (
-          <Space direction="vertical" size={0}>
-            <Text code style={{ fontSize: '11px' }}>
-              {safeTransactionId}
-            </Text>
-            {record.transactionDetails && (
-              <Tooltip title="View transaction details">
-                <Button 
-                  type="link" 
-                  size="small" 
-                  icon={<FileTextOutlined />}
-                  onClick={() => {
-                    if (record.transactionDetails) {
-                      Modal.info({
-                        title: 'Transaction Details',
-                        width: 600,
-                        content: (
-                          <Descriptions bordered size="small" column={1}>
-                            <Descriptions.Item label="Transaction ID">
-                              {String(record.transactionDetails.transactionNumber || transactionId || 'N/A')}
-                            </Descriptions.Item>
-                            <Descriptions.Item label="Date">
-                              {formatDate(record.transactionDetails.saleDate)}
-                            </Descriptions.Item>
-                            <Descriptions.Item label="Total Amount">
-                              {formatCurrency(record.transactionDetails.totalAmount)}
-                            </Descriptions.Item>
-                            <Descriptions.Item label="Items">
-                              {Array.isArray(record.transactionDetails.items) ? record.transactionDetails.items.length : 0} items
-                            </Descriptions.Item>
-                            <Descriptions.Item label="Customer">
-                              {String(record.transactionDetails.customerName || record.customerName || 'Unknown')}
-                            </Descriptions.Item>
-                            <Descriptions.Item label="Cashier">
-                              {String(record.transactionDetails.cashierName || record.cashierName || 'Unknown')}
-                            </Descriptions.Item>
-                          </Descriptions>
-                        )
-                      });
-                    }
-                  }}
-                />
-              </Tooltip>
-            )}
-          </Space>
-        );
-      }
     },
     {
       title: 'Total Amount',
@@ -1074,9 +1059,21 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
     }
   ];
 
+  // Optimized useEffect for fetching credits
   useEffect(() => {
-    fetchCredits();
+    if (isInitialMount.current) {
+      fetchCredits();
+    }
   }, [fetchCredits]);
+
+  // Cleanup function
+  useEffect(() => {
+    return () => {
+      if (apiCallTimeoutRef.current) {
+        clearTimeout(apiCallTimeoutRef.current);
+      }
+    };
+  }, []);
 
   return (
     <div style={{ padding: '24px' }}>
@@ -1085,10 +1082,10 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
       </Title>
 
       {/* Connection Status Alert */}
-      {retryCount > 0 && (
+      {retryCountRef.current > 0 && (
         <Alert
           message="Connection Issues Detected"
-          description={`Attempting to reconnect... (${retryCount}/3)`}
+          description={`Attempting to reconnect... (${retryCountRef.current}/2)`}
           type="warning"
           showIcon
           icon={<WarningOutlined />}
@@ -1246,7 +1243,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
           <Col xs={24}>
             <Space>
               <Button 
-                onClick={() => fetchCredits()} 
+                onClick={() => fetchCredits(true)} 
                 loading={loading}
                 icon={<SyncOutlined />}
               >
@@ -1293,7 +1290,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
             </Text>
             <Button 
               icon={<SyncOutlined />} 
-              onClick={() => fetchCredits()}
+              onClick={() => fetchCredits(true)}
               loading={loading}
               size="small"
             >
@@ -1307,11 +1304,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
             <Spin size="large" />
             <div style={{ marginTop: 16 }}>
               <Text type="secondary">Loading credit records...</Text>
-              {retryCount > 0 && (
-                <div>
-                  <Text type="warning">Attempting retry {retryCount}/3</Text>
-                </div>
-              )}
             </div>
           </div>
         ) : filteredCredits.length === 0 ? (
@@ -1322,13 +1314,13 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
                 <Text>No credit records found</Text>
                 {credits.length === 0 && (
                   <Text type="secondary">
-                    {retryCount > 0 ? 'Unable to load credits from server' : 'No data available'}
+                    No data available
                   </Text>
                 )}
               </Space>
             }
           >
-            <Button type="primary" onClick={() => fetchCredits()}>
+            <Button type="primary" onClick={() => fetchCredits(true)}>
               Try Again
             </Button>
           </Empty>
@@ -1350,7 +1342,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
         )}
       </Card>
 
-      {/* Payment Modal */}
+      {/* Payment Modal - Simplified version */}
       <Modal
         title="Record Credit Payment"
         open={paymentModalVisible}
@@ -1360,7 +1352,7 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
           paymentForm.resetFields();
         }}
         footer={null}
-        width={600}
+        width={500}
       >
         {selectedCredit && (
           <Form
@@ -1451,26 +1443,6 @@ const handleCreditPayment = async (credit, paymentAmount, paymentMethod) => {
                 <Option value="card">Card</Option>
               </Select>
             </Form.Item>
-
-            {/* Payment Preview */}
-            {paymentForm.getFieldValue('amount') && (
-              <Alert
-                message="Payment Impact"
-                description={
-                  <Space direction="vertical">
-                    <Text>Current Balance: {formatCurrency(selectedCredit.balanceDue)}</Text>
-                    <Text>Payment Amount: {formatCurrency(paymentForm.getFieldValue('amount'))}</Text>
-                    <Text strong>New Balance: {formatCurrency(Math.max(0, selectedCredit.balanceDue - (paymentForm.getFieldValue('amount') || 0)))}</Text>
-                    <Text>New Status: {
-                      (selectedCredit.balanceDue - (paymentForm.getFieldValue('amount') || 0)) <= 0 ? 'Paid' : 
-                      (selectedCredit.amountPaid || 0) + (paymentForm.getFieldValue('amount') || 0) > 0 ? 'Partially Paid' : 'Pending'
-                    }</Text>
-                  </Space>
-                }
-                type="info"
-                showIcon
-              />
-            )}
 
             <Form.Item style={{ marginTop: 16, marginBottom: 0 }}>
               <Space>

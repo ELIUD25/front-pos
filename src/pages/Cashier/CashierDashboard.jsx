@@ -1,4 +1,4 @@
-// src/pages/Cashier/CashierDashboard.jsx - UPDATED FOR CREDIT BALANCE DISPLAY
+// src/pages/Cashier/CashierDashboard.jsx - COMPLETE UPFRONT PAYMENT SUPPORT
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Layout, Card, Row, Col, Statistic, Typography, Tag,
@@ -22,7 +22,7 @@ import {
   RiseOutlined, FallOutlined, StockOutlined
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { authAPI, unifiedAPI, productAPI, creditAPI, transactionAPI } from '../../services/api';
+import { authAPI, unifiedAPI, productAPI, creditAPI, transactionAPI, getDefaultStats } from '../../services/api';
 import Cart from './Cart';
 import ReceiptTemplate from '../../components/ReceiptTemplate';
 import dayjs from 'dayjs';
@@ -100,7 +100,8 @@ const getDefaultCashierStats = () => ({
   bankMpesaAmount: 0,
   creditAmount: 0,
   cashierItemsSold: 0,
-  creditTransactions: 0
+  creditTransactions: 0,
+  outstandingCredit: 0 // NEW: Track outstanding credit separately
 });
 
 // Color scheme matching your other components
@@ -246,14 +247,14 @@ const CashierDashboard = () => {
     return true;
   }, [selectedShop, cashier]);
 
-  // UPDATED: Fetch cashier daily stats to match image requirements
+  // UPDATED: Fetch cashier daily stats with proper credit balance display
   const fetchCashierDailyStats = useCallback(async () => {
     if (!cashier?._id || !selectedShop?._id) return;
 
     setPosLoading(prev => ({ ...prev, stats: true }));
     
     try {
-      console.log('📊 Fetching cashier daily stats...');
+      console.log('📊 Fetching cashier daily stats with proper credit balance...');
 
       const today = dayjs().startOf('day').toISOString();
       const now = dayjs().toISOString();
@@ -263,25 +264,47 @@ const CashierDashboard = () => {
         cashierId: cashier._id,
         shopId: selectedShop._id,
         startDate: today,
-        endDate: now,
-        status: 'completed'
+        endDate: now
       });
 
       // Extract and transform data for cashier dashboard
       const transactions = combinedData.transactions || [];
       const summary = combinedData.summary || {};
       const enhancedStats = combinedData.enhancedStats?.financialStats || {};
+      const credits = combinedData.credits || [];
+
+      console.log('💰 Credit data for display:', {
+        totalCredits: credits.length,
+        outstandingCredit: enhancedStats.outstandingCredit,
+        totalCreditGiven: enhancedStats.totalCreditGiven
+      });
 
       // Calculate stats to match image requirements
-      const totalSales = summary.totalRevenue || enhancedStats.totalRevenue || 0;
+      const totalSales = enhancedStats.totalRevenue || summary.totalRevenue || 0;
       const totalTransactions = transactions.length;
       
-      // UPDATED: Credit amount now shows only outstanding balance (balance due)
-      const creditAmount = enhancedStats.outstandingCredit || summary.outstandingCredit || 0;
+      // UPDATED: Use outstandingCredit which shows only remaining balance
+      const outstandingCredit = enhancedStats.outstandingCredit || summary.outstandingCredit || 0;
       const creditTransactions = transactions.filter(t => t.paymentMethod === 'credit').length;
       
-      const cashAmount = enhancedStats.totalCash || summary.totalCash || 0;
-      const bankMpesaAmount = enhancedStats.totalMpesaBank || summary.totalMpesaBank || 0;
+      // Calculate cash and bank_mpesa from payment splits
+      let cashAmount = 0;
+      let bankMpesaAmount = 0;
+
+      transactions.forEach(transaction => {
+        if (transaction.paymentSplit) {
+          cashAmount += CashierCalculationUtils.safeNumber(transaction.paymentSplit.cash);
+          bankMpesaAmount += CashierCalculationUtils.safeNumber(transaction.paymentSplit.bank_mpesa);
+        } else {
+          // Fallback calculation
+          if (transaction.paymentMethod === 'cash') {
+            cashAmount += CashierCalculationUtils.safeNumber(transaction.totalAmount);
+          } else if (['mpesa', 'bank', 'card', 'bank_mpesa'].includes(transaction.paymentMethod)) {
+            bankMpesaAmount += CashierCalculationUtils.safeNumber(transaction.totalAmount);
+          }
+        }
+      });
+
       const cashierItemsSold = transactions.reduce((sum, t) => 
         sum + (t.items?.reduce((itemSum, item) => itemSum + (item.quantity || 0), 0) || 0), 0
       );
@@ -289,11 +312,20 @@ const CashierDashboard = () => {
       setDailyStats({
         totalSales,
         totalTransactions,
-        creditAmount, // UPDATED: Now shows only outstanding balance
-        creditTransactions,
         cashAmount,
         bankMpesaAmount,
-        cashierItemsSold
+        creditAmount: outstandingCredit, // UPDATED: Now shows only outstanding balance
+        creditTransactions,
+        cashierItemsSold,
+        outstandingCredit // Store separately for reference
+      });
+
+      console.log('✅ Daily stats updated with proper credit balance:', {
+        totalSales,
+        cashAmount,
+        bankMpesaAmount,
+        creditAmount: outstandingCredit, // This should show only remaining balance
+        outstandingCredit
       });
 
     } catch (error) {
@@ -304,12 +336,12 @@ const CashierDashboard = () => {
     }
   }, [cashier, selectedShop]);
 
-  // UPDATED: Today's transactions fetch - only transactions, no credits
+  // UPDATED: Today's transactions fetch with proper credit balance display
   const fetchTodayTransactions = useCallback(async () => {
     if (!cashier?._id || !selectedShop?._id) return;
 
     try {
-      console.log('📊 Fetching today\'s transactions...');
+      console.log('📊 Fetching today\'s transactions with proper credit balance...');
       
       const today = dayjs().startOf('day').toISOString();
       const now = dayjs().toISOString();
@@ -319,26 +351,32 @@ const CashierDashboard = () => {
         cashierId: cashier._id,
         shopId: selectedShop._id,
         startDate: today,
-        endDate: now,
-        status: 'completed'
+        endDate: now
       });
 
       const transactions = transactionsData.transactions || [];
       
       // UPDATED: Process transactions to show correct credit amounts
       const processedTransactions = transactions.map(transaction => {
+        // For credit transactions, ensure we show the correct amounts
         if (transaction.paymentMethod === 'credit') {
-          // For credit transactions, show only the outstanding balance in credit field
           return {
             ...transaction,
-            // The credit amount shown should be the outstanding balance, not total amount
-            displayAmount: transaction.outstandingRevenue || transaction.balanceDue || transaction.totalAmount
+            // The amount shown should be the recognized revenue (amount paid upfront)
+            displayAmount: transaction.recognizedRevenue || transaction.amountPaid || 0,
+            // The credit balance should be the outstanding balance only
+            creditBalance: transaction.outstandingRevenue || transaction.balanceDue || 0
           };
         }
-        return transaction;
+        return {
+          ...transaction,
+          displayAmount: transaction.totalAmount || 0,
+          creditBalance: 0
+        };
       });
       
       setTodayTransactions(processedTransactions);
+      console.log('✅ Transactions processed with proper credit balance display');
 
     } catch (error) {
       console.error('❌ Error fetching today\'s transactions:', error);
@@ -524,7 +562,7 @@ const CashierDashboard = () => {
     } else if (method === 'credit') {
       setCreditPaymentData({
         amountPaid: 0,
-        balance: totals.subtotal, // UPDATED: Initial balance is full amount
+        balance: totals.subtotal, // Initial balance is full amount
         customerName: '',
         customerPhone: '',
         dueDate: dayjs().add(7, 'day'),
@@ -538,7 +576,7 @@ const CashierDashboard = () => {
       });
       creditForm.setFieldsValue({
         amountPaid: 0,
-        balance: totals.subtotal, // UPDATED: Initial balance is full amount
+        balance: totals.subtotal, // Initial balance is full amount
         customerName: '',
         customerPhone: '',
         dueDate: dayjs().add(7, 'day'),
@@ -551,7 +589,7 @@ const CashierDashboard = () => {
     setPaymentModalVisible(true);
   };
 
-  // Enhanced checkout with credit balance display logic
+  // UPDATED: Enhanced checkout with proper credit balance display logic and amountPaidNow support
   const handleCheckout = async (paymentMethod, paymentDetails = {}) => {
     if (!validateShopAndCashier()) return;
 
@@ -572,7 +610,7 @@ const CashierDashboard = () => {
         return `TXN-${timestamp}-${random}`.toUpperCase();
       };
 
-      // Enhanced transaction data with credit balance display
+      // Enhanced transaction data with proper credit balance display
       const transactionData = {
         shop: selectedShop._id,
         shopName: selectedShop.name,
@@ -602,20 +640,23 @@ const CashierDashboard = () => {
         }, 0)
       };
 
-      // Enhanced payment data for different methods with balance display
+      // Enhanced payment data for different methods with proper balance display
       if (paymentMethod === 'cash_bank_mpesa') {
         transactionData.cashAmount = paymentDetails.cashAmount;
         transactionData.bankMpesaAmount = paymentDetails.bankMpesaAmount;
         transactionData.paymentSplit = {
           cash: paymentDetails.cashAmount,
-          bank_mpesa: paymentDetails.bankMpesaAmount
+          bank_mpesa: paymentDetails.bankMpesaAmount,
+          credit: 0
         };
       } else if (paymentMethod === 'credit') {
         const amountPaid = paymentDetails.amountPaid || 0;
-        const balanceDue = paymentDetails.balance || totals.subtotal;
+        const balanceDue = Math.max(0, totals.subtotal - amountPaid);
         
+        // CRITICAL FIX: Add amountPaidNow field that server expects
         transactionData.amountPaid = amountPaid;
-        transactionData.outstandingRevenue = balanceDue; // UPDATED: This is what will be displayed as credit
+        transactionData.amountPaidNow = amountPaid; // This is what the server expects
+        transactionData.outstandingRevenue = balanceDue; // This is what will be displayed as credit
         transactionData.balanceDue = balanceDue;
         transactionData.dueDate = paymentDetails.dueDate;
         transactionData.creditStatus = balanceDue > 0 ? 'pending' : 'paid';
@@ -632,7 +673,7 @@ const CashierDashboard = () => {
         
         // Set immediate revenue for credit transactions (the amount paid upfront)
         transactionData.immediateRevenue = amountPaid || 0;
-        transactionData.recognizedRevenue = amountPaid || 0; // UPDATED: Only recognized revenue is what's paid
+        transactionData.recognizedRevenue = amountPaid || 0; // Only recognized revenue is what's paid
         
         if (amountPaid > 0 && balanceDue > 0) {
           transactionData.creditStatus = 'partially_paid';
@@ -642,34 +683,47 @@ const CashierDashboard = () => {
         transactionData.paymentSplit = {
           cash: 0,
           bank_mpesa: 0,
-          credit: balanceDue // UPDATED: Only the remaining balance goes to credit
+          credit: balanceDue, // Only the remaining balance goes to credit
+          upfront_cash: 0,
+          upfront_bank_mpesa: 0
         };
 
         // Add upfront payment to the appropriate payment method
         if (paymentDetails.upfrontPaymentMethod === 'cash') {
+          transactionData.paymentSplit.upfront_cash = amountPaid || 0;
           transactionData.paymentSplit.cash = amountPaid || 0;
         } else if (paymentDetails.upfrontPaymentMethod === 'bank_mpesa') {
+          transactionData.paymentSplit.upfront_bank_mpesa = amountPaid || 0;
           transactionData.paymentSplit.bank_mpesa = amountPaid || 0;
         } else if (paymentDetails.upfrontPaymentMethod === 'cash_bank_mpesa' && paymentDetails.upfrontPaymentSplit) {
+          transactionData.paymentSplit.upfront_cash = paymentDetails.upfrontPaymentSplit.cash || 0;
+          transactionData.paymentSplit.upfront_bank_mpesa = paymentDetails.upfrontPaymentSplit.bank_mpesa || 0;
           transactionData.paymentSplit.cash = paymentDetails.upfrontPaymentSplit.cash || 0;
           transactionData.paymentSplit.bank_mpesa = paymentDetails.upfrontPaymentSplit.bank_mpesa || 0;
         }
+
+        console.log('💰 Credit transaction payment split with upfront support:', transactionData.paymentSplit);
       } else {
         // For cash or bank_mpesa payments, set payment split
         transactionData.paymentSplit = {
           cash: paymentMethod === 'cash' ? totals.subtotal : 0,
           bank_mpesa: paymentMethod === 'bank_mpesa' ? totals.subtotal : 0,
-          credit: 0
+          credit: 0,
+          upfront_cash: 0,
+          upfront_bank_mpesa: 0
         };
       }
 
-      console.log('💰 Sending enhanced transaction data with credit balance display:', transactionData);
+      console.log('💰 Sending enhanced transaction data with proper credit balance and amountPaidNow:', {
+        ...transactionData,
+        amountPaidNow: transactionData.amountPaidNow // Highlight this critical field
+      });
 
       const response = await transactionAPI.create(transactionData);
       const transactionResult = response?.data || response;
       
       if (transactionResult && transactionResult._id) {
-        console.log('✅ Transaction completed successfully with credit balance display');
+        console.log('✅ Transaction completed successfully with proper credit balance display');
         
         setCurrentTransaction(transactionResult);
         setShowReceipt(true);
@@ -717,11 +771,11 @@ const CashierDashboard = () => {
     }
   };
 
-  // UPDATED: Today's Transactions Display Component - Only transactions table with credit balance display
+  // UPDATED: Today's Transactions Display Component - Only transactions table with proper credit balance display
   const TodaysTransactionsCard = () => {
     const allTransactions = [...todayTransactions];
 
-    // Enhanced transaction columns matching image requirements with credit balance display
+    // Enhanced transaction columns matching image requirements with proper credit balance display
     const transactionColumns = [
       {
         title: 'Transaction',
@@ -780,15 +834,15 @@ const CashierDashboard = () => {
         )
       },
       {
-        title: 'Amount',
-        dataIndex: 'totalAmount',
-        key: 'totalAmount',
+        title: 'Amount Paid',
+        dataIndex: 'displayAmount',
+        key: 'displayAmount',
         width: 100,
         render: (amount, record) => {
-          // UPDATED: For credit transactions, show the recognized revenue (amount paid) instead of total
+          // For credit transactions, show the recognized revenue (amount paid upfront)
           const displayAmount = record.paymentMethod === 'credit' 
             ? (record.recognizedRevenue || record.amountPaid || 0)
-            : amount;
+            : (record.totalAmount || 0);
             
           return (
             <Text strong style={{ 
@@ -802,16 +856,17 @@ const CashierDashboard = () => {
       },
       {
         title: 'Credit Balance',
-        dataIndex: 'outstandingRevenue',
-        key: 'outstandingRevenue',
+        dataIndex: 'creditBalance',
+        key: 'creditBalance',
         width: 100,
         render: (balance, record) => {
-          // UPDATED: Only show credit balance for credit transactions
+          // Only show credit balance for credit transactions
           if (record.paymentMethod !== 'credit') return '-';
           
+          const creditBalance = record.outstandingRevenue || record.balanceDue || 0;
           return (
             <Text strong type="danger" style={{ fontSize: '12px' }}>
-              {CashierCalculationUtils.formatCurrency(balance || record.balanceDue || 0)}
+              {CashierCalculationUtils.formatCurrency(creditBalance)}
             </Text>
           );
         }
@@ -855,7 +910,7 @@ const CashierDashboard = () => {
 
     return (
       <div>
-        {/* Simple summary matching image with credit balance display */}
+        {/* Simple summary matching image with proper credit balance display */}
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
           <Col xs={24} sm={12} md={8}>
             <Card 
@@ -1058,7 +1113,7 @@ const CashierDashboard = () => {
     );
   });
 
-  // Enhanced Payment Method Modal with credit balance display
+  // Enhanced Payment Method Modal with proper credit balance display
   const renderPaymentModal = () => {
     const modalTitle = `Select Payment Method - ${CashierCalculationUtils.formatCurrency(totals.subtotal)}`;
 
@@ -1257,13 +1312,7 @@ const CashierDashboard = () => {
                   upfrontPaymentMethod: 'cash'
                 }}
               >
-                <Alert
-                  message="Credit Sale - Balance Due Display"
-                  description="Credit amount shown will be the remaining balance only. Upfront payments go to cash/bank revenue."
-                  type="warning"
-                  showIcon
-                  style={{ marginBottom: '16px' }}
-                />
+                
                 
                 <Row gutter={16}>
                   <Col span={12}>
@@ -1340,13 +1389,7 @@ const CashierDashboard = () => {
                   title="Upfront Payment (Optional)"
                   style={{ marginBottom: '16px', borderColor: COLOR_SCHEME.info }}
                 >
-                  <Alert
-                    message="Upfront Payment Information"
-                    description="Any upfront payment will be added to total sales and cash/bank revenue immediately. Only the remaining balance will show as credit."
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: '12px' }}
-                  />
+                 
                   
                   <Row gutter={16}>
                     <Col span={12}>
@@ -1445,7 +1488,7 @@ const CashierDashboard = () => {
                 <Row gutter={16}>
                   <Col span={12}>
                     <Form.Item
-                      label="Balance Due (KES)"
+                      label="Balance Due (Credit)"
                       name="balance"
                     >
                       <InputNumber
@@ -1573,7 +1616,7 @@ const CashierDashboard = () => {
     }
   };
 
-  // Process Payment with credit balance display
+  // UPDATED: Process Payment with proper credit balance display and amountPaidNow support
   const processPayment = async () => {
     if (selectedPaymentMethod === 'cash_bank_mpesa') {
       if (!validateCashBankMpesaPayment()) return;
@@ -1588,9 +1631,10 @@ const CashierDashboard = () => {
       
       const values = creditForm.getFieldsValue();
       
-      // Prepare upfront payment data
+      // Prepare upfront payment data with amountPaidNow support
       const paymentDetails = {
         amountPaid: values.amountPaid,
+        amountPaidNow: values.amountPaid, // CRITICAL: Add this field for server
         balance: values.balance,
         customerName: values.customerName,
         customerPhone: values.customerPhone,
@@ -1607,6 +1651,8 @@ const CashierDashboard = () => {
           bank_mpesa: values.upfrontBankMpesaAmount || 0
         };
       }
+      
+      console.log('💰 Processing credit payment with amountPaidNow:', paymentDetails);
       
       await handleCheckout('credit', paymentDetails);
       
@@ -1631,16 +1677,16 @@ const CashierDashboard = () => {
     });
   };
 
-  // Credit payment change handler with balance display
+  // Credit payment change handler with proper balance display
   const handleCreditPaymentChange = (changedValues, allValues) => {
     const amountPaid = parseFloat(allValues.amountPaid || 0);
     const totalAmount = totals.subtotal;
-    const balance = totalAmount - amountPaid;
+    const balance = Math.max(0, totalAmount - amountPaid);
     
     setCreditPaymentData(prev => ({
       ...prev,
       amountPaid,
-      balance: Math.max(0, balance),
+      balance: balance,
       shopName: allValues.shopName || prev.shopName,
       shopId: allValues.shopId || prev.shopId,
       upfrontPaymentMethod: allValues.upfrontPaymentMethod || prev.upfrontPaymentMethod,
@@ -1651,7 +1697,7 @@ const CashierDashboard = () => {
     }));
   };
 
-  // Fallback function for basic stats calculation with credit balance display
+  // Fallback function for basic stats calculation with proper credit balance display
   const fetchDailySalesFallback = async () => {
     try {
       const today = dayjs().startOf('day').toISOString();
@@ -1661,13 +1707,12 @@ const CashierDashboard = () => {
         cashierId: cashier._id,
         shopId: selectedShop._id,
         startDate: today,
-        endDate: now,
-        status: 'completed'
+        endDate: now
       });
       
       const transactions = response.transactions || [];
       
-      // Calculate basic stats with credit balance display
+      // Calculate basic stats with proper credit balance display
       const totalSales = transactions.reduce((sum, t) => 
         sum + (t.paymentMethod === 'credit' 
           ? (t.recognizedRevenue || t.amountPaid || 0) 
@@ -1677,7 +1722,7 @@ const CashierDashboard = () => {
       const totalTransactions = transactions.length;
       
       // UPDATED: Credit amount now shows only outstanding balance
-      const creditAmount = transactions
+      const outstandingCredit = transactions
         .filter(t => t.paymentMethod === 'credit')
         .reduce((sum, t) => sum + (t.outstandingRevenue || t.balanceDue || 0), 0);
       const creditTransactions = transactions.filter(t => t.paymentMethod === 'credit').length;
@@ -1702,13 +1747,14 @@ const CashierDashboard = () => {
       setDailyStats({
         totalSales,
         totalTransactions,
-        creditAmount, // UPDATED: Now shows only outstanding balance
-        creditTransactions,
         cashAmount,
         bankMpesaAmount,
+        creditAmount: outstandingCredit, // UPDATED: Now shows only outstanding balance
+        creditTransactions,
         cashierItemsSold: transactions.reduce((sum, t) => 
           sum + (t.items?.reduce((itemSum, item) => itemSum + (item.quantity || 0), 0) || 0), 0
-        )
+        ),
+        outstandingCredit
       });
       
     } catch (fallbackError) {
@@ -1851,12 +1897,12 @@ const CashierDashboard = () => {
       </Header>
 
       <Content style={{ padding: '24px' }}>
-        {/* UPDATED: Only Sales Breakdown - REMOVED ALL STATS CARDS */}
+        {/* UPDATED: Sales Breakdown with Proper Credit Balance Display */}
         <Card 
           style={{ marginBottom: '16px', borderRadius: '8px' }}
           loading={posLoading.stats}
         >
-          {/* UPDATED: Sales Breakdown Summary Only - No Stats Cards */}
+          {/* UPDATED: Sales Breakdown Summary with Proper Credit Balance */}
           <div style={{ padding: '12px', background: '#f9f9f9', borderRadius: '6px' }}>
             <Row gutter={16}>
               <Col span={24}>
@@ -1869,9 +1915,21 @@ const CashierDashboard = () => {
                 <div style={{ marginTop: '8px' }}>
                   <Text>
                     Composition: 
-                    <Tag color={COLOR_SCHEME.primary} style={{ margin: '0 4px' }}>Cash: {CashierCalculationUtils.formatCurrency(dailyStats.cashAmount)}</Tag> + 
-                    <Tag color={COLOR_SCHEME.purple} style={{ margin: '0 4px' }}>Bank/Mpesa: {CashierCalculationUtils.formatCurrency(dailyStats.bankMpesaAmount)}</Tag> + 
-                    <Tag color={COLOR_SCHEME.warning} style={{ margin: '0 4px' }}>Credit Balance: {CashierCalculationUtils.formatCurrency(dailyStats.creditAmount)}</Tag>
+                    <Tag color={COLOR_SCHEME.primary} style={{ margin: '0 4px' }}>
+                      Cash: {CashierCalculationUtils.formatCurrency(dailyStats.cashAmount)}
+                    </Tag> + 
+                    <Tag color={COLOR_SCHEME.purple} style={{ margin: '0 4px' }}>
+                      Bank/Mpesa: {CashierCalculationUtils.formatCurrency(dailyStats.bankMpesaAmount)}
+                    </Tag> + 
+                    <Tag color={COLOR_SCHEME.warning} style={{ margin: '0 4px' }}>
+                      Credit Balance: {CashierCalculationUtils.formatCurrency(dailyStats.creditAmount)}
+                    </Tag>
+                  </Text>
+                </div>
+                {/* NEW: Credit Balance Explanation */}
+                <div style={{ marginTop: '4px' }}>
+                  <Text type="secondary" style={{ fontSize: '12px' }}>
+                    Note: Credit balance shows only outstanding amounts. Upfront payments are included in cash/bank totals.
                   </Text>
                 </div>
               </Col>
@@ -2012,7 +2070,7 @@ const CashierDashboard = () => {
             </FloatButton.Group>
           </TabPane>
 
-          {/* Today's Transactions Tab - UPDATED: Only transactions table with credit balance display */}
+          {/* Today's Transactions Tab - UPDATED: Only transactions table with proper credit balance display */}
           <TabPane 
             tab={
               <span>
