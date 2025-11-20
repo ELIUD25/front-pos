@@ -1387,8 +1387,10 @@
 import axios from 'axios';
 
 // Configuration
-const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'https://back-pos-five.vercel.app/api';
-const REQUEST_TIMEOUT = 120000; // INCREASED TO 120 seconds
+// const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'https://back-pos-five.vercel.app/api';
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'https://back-pos-five.vercel.app/api';
+
+const REQUEST_TIMEOUT = 30000; // INCREASED TO 120 seconds
 
 // Create axios instance
 const createApiInstance = (baseURL = API_BASE_URL) => {
