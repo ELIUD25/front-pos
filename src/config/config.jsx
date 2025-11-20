@@ -7,7 +7,7 @@ export const ROLES = {
 const config = {
   // Removed JWT configuration
   HARDCODED_ADMIN: {
-    email: 'kinyuastanzo6759@gmail.com',
+    email: 'chemistseridah@gmail.com',
     password: 'Kinyua01'
   },
   API_BASE_URL: process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000/api',

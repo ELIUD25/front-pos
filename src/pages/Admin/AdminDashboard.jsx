@@ -749,7 +749,7 @@ const processDashboardData = (comprehensiveData, shops, activeFilters) => {
       >
         <div className="logo" style={{ padding: '16px 0', textAlign: 'center', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
           <Title level={4} style={{ color: 'white', margin: 0, fontWeight: 'bold' }}>
-            {collapsed ? 'TP' : 'Demo Shop'}
+            {collapsed ? 'TP' : 'Seridah Chemist'}
           </Title>
         </div>
         <Menu 
@@ -794,7 +794,7 @@ const processDashboardData = (comprehensiveData, shops, activeFilters) => {
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
             <Title level={4} style={{ color: 'white', margin: 0, fontWeight: 'bold' }}>
-              DEMO SHOP - ADMIN DASHBOARD
+              Seridah Chemist - ADMIN DASHBOARD
             </Title>
             <Space>
               {/* Auto-refresh toggle */}
@@ -879,7 +879,7 @@ const processDashboardData = (comprehensiveData, shops, activeFilters) => {
               animation: 'fadeIn 1s',
               textShadow: '2px 2px 4px rgba(0,0,0,0.1)'
             }}>
-              WELCOME TO THE DEMO SHOP ADMIN DASHBOARD
+              WELCOME TO THE Seridah Chemist ADMIN DASHBOARD
             </div>
           )}
           

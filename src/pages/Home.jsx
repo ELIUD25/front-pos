@@ -145,7 +145,7 @@ const Home = () => {
               mb: 1
             }}
           >
-            DEMO POS
+            SERIDAH CHEMIST
           </Typography>
           <Typography 
             variant="h6" 
@@ -378,7 +378,7 @@ const Home = () => {
             <Box sx={{ mt: 2, textAlign: 'center' }}>
               <Typography variant="caption" sx={{ color: alpha('#fff', 0.6) }}>
         Fusion XE POS: Streamlining Your Business.
- Developed by Stancylus Kalong'o | Contact: 0746919850
+ Developed by Eliud Maina | Contact: 0746082039
               </Typography>
             </Box>
           </Box>

@@ -2530,4 +2530,3 @@ const CashierManagement = () => {
 export default CashierManagement;
 
 
-//corrected.
