@@ -1384,71 +1384,19 @@
 
 
 
+
+// src/services/api.js - COMPLETELY UPDATED WITH PERFORMANCE OPTIMIZATIONS
 import axios from 'axios';
+import { CalculationUtils } from '../utils/calculationUtils';
 
-// Configuration
-// const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'https://back-pos-five.vercel.app/api';
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'https://back-pos-five.vercel.app/api';
-
-const REQUEST_TIMEOUT = 30000; // INCREASED TO 120 seconds
-
-// Create axios instance
-const createApiInstance = (baseURL = API_BASE_URL) => {
-  const instance = axios.create({
-    baseURL,
-    timeout: REQUEST_TIMEOUT,
-    headers: { 
-      'Content-Type': 'application/json'
-    }
-  });
-
-  // Request interceptor to add auth token
-  instance.interceptors.request.use(
-    (config) => {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('userToken') || localStorage.getItem('cashierToken');
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-      
-      // Add cache busting for GET requests to avoid stale data
-      if (config.method === 'get') {
-        config.params = {
-          ...config.params,
-          _t: Date.now() // cache bust
-        };
-      }
-      
-      return config;
-    },
-    (error) => {
-      return Promise.reject(error);
-    }
-  );
-
-  // Response interceptor for error handling
-  instance.interceptors.response.use(
-    (response) => response,
-    (error) => {
-      if (error.response?.status === 401) {
-        localStorage.removeItem('adminToken');
-        localStorage.removeItem('userToken');
-        localStorage.removeItem('cashierToken');
-        localStorage.removeItem('userData');
-        localStorage.removeItem('adminData');
-        localStorage.removeItem('cashierData');
-        if (typeof window !== 'undefined') {
-          window.location.href = '/cashier/login';
-        }
-      }
-      return Promise.reject(error);
-    }
-  );
-
-  return instance;
+// Enhanced Configuration
+const API_CONFIG = {
+  baseURL: process.env.REACT_APP_API_BASE_URL || 'http://localhost:5001/api',
+  timeout: 15000, // Reduced from 30000 to 15000ms
+  retryAttempts: 2,
+  retryDelay: 1000,
+  cacheTimeout: 60000 // 1 minute cache
 };
-
-// API instances
-const api = createApiInstance();
 
 // Enhanced Error handler
 const handleApiError = (error) => {
@@ -1460,9 +1408,8 @@ const handleApiError = (error) => {
     config: error.config
   });
 
-  // NEW: Specific timeout error handling
-  if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-    return 'Request timeout. The server is taking too long to respond. Please try again.';
+  if (error.code === 'ECONNABORTED') {
+    return 'Request timed out. Please check your connection and try again.';
   }
   
   if (error.code === 'NETWORK_ERROR' || error.code === 'ECONNREFUSED') {
@@ -1508,86 +1455,155 @@ const handleApiError = (error) => {
   return 'An unexpected error occurred';
 };
 
-// Cache for frequently requested data
-const cache = {
-  data: {},
-  timestamps: {},
-  get: (key) => {
-    const item = cache.data[key];
-    const timestamp = cache.timestamps[key];
-    if (item && timestamp && Date.now() - timestamp < 30000) {
-      return item;
+// Enhanced Cache System
+const createCache = () => {
+  const cache = {
+    data: {},
+    timestamps: {},
+    
+    get: (key) => {
+      const item = cache.data[key];
+      const timestamp = cache.timestamps[key];
+      if (item && timestamp && Date.now() - timestamp < API_CONFIG.cacheTimeout) {
+        console.log(`🔄 Using cached data for: ${key}`);
+        return item;
+      }
+      return null;
+    },
+    
+    set: (key, data) => {
+      cache.data[key] = data;
+      cache.timestamps[key] = Date.now();
+    },
+    
+    clear: (key) => {
+      delete cache.data[key];
+      delete cache.timestamps[key];
+    },
+    
+    clearAll: () => {
+      cache.data = {};
+      cache.timestamps = {};
+    },
+    
+    // Clear expired entries
+    cleanup: () => {
+      const now = Date.now();
+      Object.keys(cache.timestamps).forEach(key => {
+        if (now - cache.timestamps[key] > API_CONFIG.cacheTimeout) {
+          delete cache.data[key];
+          delete cache.timestamps[key];
+        }
+      });
     }
-    return null;
-  },
-  set: (key, data) => {
-    cache.data[key] = data;
-    cache.timestamps[key] = Date.now();
-  },
-  clear: (key) => {
-    delete cache.data[key];
-    delete cache.timestamps[key];
-  },
-  clearAll: () => {
-    cache.data = {};
-    cache.timestamps = {};
-  }
+  };
+
+  // Cleanup every 5 minutes
+  setInterval(() => cache.cleanup(), 300000);
+  
+  return cache;
 };
 
-// ADDED: Default stats function to replace missing CalculationUtils.getDefaultStats
-const getDefaultStats = () => ({
-  totalSales: 0,
-  totalRevenue: 0,
-  totalExpenses: 0,
-  grossProfit: 0,
-  netProfit: 0,
-  costOfGoodsSold: 0,
-  totalMpesaBank: 0,
-  totalCash: 0,
-  totalCredit: 0,
-  outstandingCredit: 0,
-  totalCreditGiven: 0,
-  creditSales: 0,
-  nonCreditSales: 0,
-  creditSalesCount: 0,
-  nonCreditSalesCount: 0,
-  completeTransactionsCount: 0,
-  recognizedCreditRevenue: 0,
-  profitMargin: 0,
-  creditCollectionRate: 0,
-  totalItemsSold: 0,
-  averageTransactionValue: 0
-});
+const cache = createCache();
 
-// ADDED: Safe calculation utilities for fallback
-const SafeCalculationUtils = {
-  safeNumber: (value, defaultValue = 0) => {
-    if (value === null || value === undefined || value === '') return defaultValue;
-    const num = Number(value);
-    return isNaN(num) ? defaultValue : num;
-  },
-  
-  formatCurrency: (amount) => {
-    const value = SafeCalculationUtils.safeNumber(amount);
-    return `KES ${value.toLocaleString('en-KE', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    })}`;
-  },
-  
-  getDefaultStats: getDefaultStats
+// Enhanced Axios Instance with Retry Logic
+const createApiInstance = (baseURL = API_CONFIG.baseURL, customTimeout = null) => {
+  const instance = axios.create({
+    baseURL,
+    timeout: customTimeout || API_CONFIG.timeout,
+    headers: { 
+      'Content-Type': 'application/json'
+    }
+  });
+
+  // Request interceptor
+  instance.interceptors.request.use(
+    (config) => {
+      const token = localStorage.getItem('adminToken') || localStorage.getItem('userToken') || localStorage.getItem('cashierToken');
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+      
+      // Add cache busting for GET requests
+      if (config.method === 'get') {
+        config.params = {
+          ...config.params,
+          _t: Date.now() // Cache buster
+        };
+      }
+      
+      console.log(`🚀 ${config.method?.toUpperCase()} ${config.url}`, config.params);
+      return config;
+    },
+    (error) => {
+      return Promise.reject(error);
+    }
+  );
+
+  // Response interceptor with enhanced retry logic
+  instance.interceptors.response.use(
+    (response) => {
+      console.log(`✅ ${response.config.method?.toUpperCase()} ${response.config.url} - Success`);
+      return response;
+    },
+    async (error) => {
+      const originalRequest = error.config;
+      
+      // Retry logic for timeout and network errors
+      if ((error.code === 'ECONNABORTED' || error.code === 'NETWORK_ERROR') && 
+          !originalRequest._retryCount) {
+        
+        originalRequest._retryCount = (originalRequest._retryCount || 0) + 1;
+        
+        if (originalRequest._retryCount <= API_CONFIG.retryAttempts) {
+          console.log(`🔄 Retry attempt ${originalRequest._retryCount} for: ${originalRequest.url}`);
+          
+          // Exponential backoff
+          const delay = API_CONFIG.retryDelay * Math.pow(2, originalRequest._retryCount - 1);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          
+          return instance(originalRequest);
+        }
+      }
+      
+      if (error.response?.status === 401) {
+        localStorage.removeItem('adminToken');
+        localStorage.removeItem('userToken');
+        localStorage.removeItem('cashierToken');
+        localStorage.removeItem('userData');
+        localStorage.removeItem('adminData');
+        localStorage.removeItem('cashierData');
+        if (typeof window !== 'undefined') {
+          window.location.href = '/cashier/login';
+        }
+      }
+      
+      console.error(`❌ API Error: ${error.config?.method?.toUpperCase()} ${error.config?.url}`, {
+        status: error.response?.status,
+        message: error.message,
+        code: error.code,
+        retryCount: originalRequest._retryCount
+      });
+      
+      return Promise.reject(error);
+    }
+  );
+
+  return instance;
 };
 
-// ==================== AUTH API SERVICE ====================
+// API instances for different timeouts
+const api = createApiInstance(); // Default 15s timeout
+const quickApi = createApiInstance(API_CONFIG.baseURL, 10000); // 10s timeout for critical operations
+const fastApi = createApiInstance(API_CONFIG.baseURL, 5000); // 5s timeout for simple operations
+
+// ==================== ENHANCED AUTH API SERVICE ====================
 
 export const authAPI = {
-  // Cashier login with email and password
+  // Cashier login with optimized timeout
   cashierLogin: async (credentials) => {
     try {
-      console.log('🔐 Attempting cashier login with:', { 
-        email: credentials.email, 
-        hasPassword: !!credentials.password 
-      });
+      console.log('🔐 Attempting cashier login with optimized timeout...');
 
       // Clear any existing tokens and data first
       localStorage.removeItem('cashierToken');
@@ -1598,24 +1614,21 @@ export const authAPI = {
       let response;
       let usedEndpoint = '';
       
-      // Try multiple possible login endpoints
+      // Try multiple possible login endpoints with fast timeout
       const loginAttempts = [
         '/auth/cashier/login',
         '/cashier/login',
-        '/auth/login',
-        '/users/login',
-        '/login'
+        '/auth/login'
       ];
 
       for (const endpoint of loginAttempts) {
         try {
           console.log(`🔄 Trying login endpoint: ${endpoint}`);
-          response = await api.post(endpoint, {
+          const fastInstance = createApiInstance(API_CONFIG.baseURL, 8000); // 8s timeout for login
+          response = await fastInstance.post(endpoint, {
             email: credentials.email,
             password: credentials.password,
             role: 'cashier'
-          }, {
-            timeout: 60000 // 60 seconds for login
           });
           usedEndpoint = endpoint;
           console.log(`✅ Success with endpoint: ${endpoint}`);
@@ -1690,12 +1703,11 @@ export const authAPI = {
     }
   },
 
-  // Admin/secure code login
+  // Admin/secure code login with optimized timeout
   requestSecureCode: async (emailData) => {
     try {
-      const response = await api.post('/auth/request-code', emailData, {
-        timeout: 60000
-      });
+      const fastInstance = createApiInstance(API_CONFIG.baseURL, 8000);
+      const response = await fastInstance.post('/auth/request-code', emailData);
       return response.data;
     } catch (error) {
       console.error('❌ Secure code request error:', error);
@@ -1705,9 +1717,8 @@ export const authAPI = {
 
   verifySecureCode: async (codeData) => {
     try {
-      const response = await api.post('/auth/verify-code', codeData, {
-        timeout: 60000
-      });
+      const fastInstance = createApiInstance(API_CONFIG.baseURL, 8000);
+      const response = await fastInstance.post('/auth/verify-code', codeData);
       
       const data = response.data;
       const user = data.user || data.data?.user || data.data || data;
@@ -1778,12 +1789,251 @@ export const authAPI = {
   }
 };
 
+// ==================== OPTIMIZED TRANSACTION API SERVICE ====================
+
+export const transactionAPI = {
+  // Optimized transaction creation with faster timeout
+  create: async (transactionData) => {
+    try {
+      console.log('💰 Creating transaction with optimized timeout...');
+      
+      // SPECIAL HANDLING FOR CREDIT PAYMENTS
+      if (transactionData.isCreditPayment) {
+        console.log('💳 Processing credit payment transaction');
+        transactionData.transactionType = 'credit_payment';
+        transactionData.paymentStatus = 'completed';
+        
+        // Ensure items array is properly formatted
+        if (transactionData.items && transactionData.items.length > 0) {
+          transactionData.items = transactionData.items.map(item => ({
+            ...item,
+            productId: item.productId || null,
+            productName: item.productName || `Credit Payment`,
+            quantity: item.quantity || 1,
+            price: item.price || transactionData.totalAmount,
+            totalPrice: item.totalPrice || transactionData.totalAmount,
+            buyingPrice: item.buyingPrice || 0
+          }));
+        }
+      }
+
+      // Use quick API for faster response
+      const response = await quickApi.post('/transactions', transactionData);
+      cache.clearAll();
+      
+      console.log('✅ Transaction created successfully');
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('❌ Error creating transaction:', error);
+      
+      // Enhanced error handling with specific messages
+      let errorMessage = 'Transaction failed. ';
+      
+      if (error.code === 'ECONNABORTED') {
+        errorMessage += 'Request timed out. Please check your connection and try again.';
+      } else if (error.response?.status === 500) {
+        errorMessage += 'Server error. Please try again.';
+      } else {
+        errorMessage += handleApiError(error);
+      }
+      
+      throw new Error(errorMessage);
+    }
+  },
+
+  getAll: async (params = {}) => {
+    try {
+      const cacheKey = `transactions_${JSON.stringify(params)}`;
+      const cached = cache.get(cacheKey);
+      if (cached) return cached;
+
+      const response = await api.get('/transactions', { params });
+      const data = response.data?.data || response.data;
+      
+      cache.set(cacheKey, data);
+      return data;
+    } catch (error) {
+      console.error('Error fetching transactions:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  getById: async (id) => {
+    try {
+      // Handle case where id might be an object instead of string
+      const transactionId = typeof id === 'object' ? id._id || id.id || id.transactionId : id;
+      
+      if (!transactionId) {
+        throw new Error('Invalid transaction ID');
+      }
+      
+      const response = await api.get(`/transactions/${transactionId}`);
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('Error fetching transaction:', error);
+      // Don't throw error for transaction details to prevent breaking the credits list
+      return null;
+    }
+  },
+
+  update: async (id, data) => {
+    try {
+      const response = await api.put(`/transactions/${id}`, data);
+      cache.clearAll();
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('Error updating transaction:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  delete: async (id) => {
+    try {
+      const response = await api.delete(`/transactions/${id}`);
+      cache.clearAll();
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('Error deleting transaction:', error);
+      throw new Error(handleApiError(error));
+    }
+  }
+};
+
+// ==================== OPTIMIZED CREDIT API SERVICE ====================
+
+export const creditAPI = {
+  // Basic CRUD operations with optimized timeouts
+  create: async (creditData) => {
+    try {
+      console.log('💳 Creating credit record with optimized timeout...');
+      
+      // Ensure we have the required fields
+      if (!creditData.transactionId) {
+        throw new Error('Transaction ID is required for credit record');
+      }
+      
+      if (!creditData.customerName) {
+        throw new Error('Customer name is required for credit record');
+      }
+      
+      const response = await quickApi.post('/credits', creditData);
+      cache.clearAll();
+      console.log('✅ Credit record created successfully');
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error creating credit record:', error);
+      
+      // Enhanced error handling
+      let errorMessage = handleApiError(error);
+      
+      if (error.message.includes('Transaction ID')) {
+        errorMessage = error.message;
+      } else if (error.response?.status === 404) {
+        errorMessage = 'Credit creation endpoint not found. Please check if the backend server is running.';
+      } else if (error.response?.status === 400) {
+        errorMessage = error.response.data?.message || 'Invalid credit data provided';
+      }
+      
+      throw new Error(errorMessage);
+    }
+  },
+
+  // Optimized credit fetching with faster timeout and simplified response
+  getAll: async (params = {}) => {
+    try {
+      console.log('📋 Fetching credits with optimized timeout...');
+      
+      const cacheKey = `credits_${JSON.stringify(params)}`;
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        console.log('✅ Using cached credits data');
+        return cached;
+      }
+
+      // Use simplified parameters for faster response
+      const optimizedParams = {
+        includeTransactions: 'false', // Don't load transaction details initially
+        status: params.status !== 'all' ? params.status : undefined,
+        shopId: params.shopId !== 'all' ? params.shopId : undefined,
+        limit: params.limit || 100, // Reduced limit for performance
+        sort: '-createdAt',
+        simple: 'true' // Request simplified response
+      };
+
+      const response = await quickApi.get('/credits', { params: optimizedParams });
+      
+      console.log('✅ Credits fetched successfully');
+      
+      cache.set(cacheKey, response.data);
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error fetching credits:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  getById: async (id) => {
+    try {
+      const response = await api.get(`/credits/${id}`);
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error fetching credit:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  update: async (id, updateData) => {
+    try {
+      const response = await api.put(`/credits/${id}`, updateData);
+      cache.clearAll();
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error updating credit:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  delete: async (id) => {
+    try {
+      const response = await api.delete(`/credits/${id}`);
+      cache.clearAll();
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error deleting credit:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  // Payment operations with optimized timeout
+  patchPayment: async (id, paymentData) => {
+    try {
+      const response = await quickApi.patch(`/credits/${id}/payment`, paymentData);
+      cache.clearAll();
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error recording payment:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  getPaymentHistory: async (creditId) => {
+    try {
+      const response = await quickApi.get(`/credits/${creditId}/payment-history`);
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error fetching payment history:', error);
+      throw new Error(handleApiError(error));
+    }
+  }
+};
+
 // ==================== ENHANCED UNIFIED API SERVICE ====================
 
 export const unifiedAPI = {
+  // Optimized combined transactions with faster timeout
   getCombinedTransactions: async (params = {}) => {
     try {
-      console.log('🚀 Fetching enhanced combined transactions...', params);
+      console.log('🚀 Fetching enhanced combined transactions with optimized timeout...', params);
       
       const cacheKey = `combined_transactions_${JSON.stringify(params)}`;
       const cached = cache.get(cacheKey);
@@ -1792,18 +2042,13 @@ export const unifiedAPI = {
         return cached;
       }
       
-      const response = await api.get('/transactions/combined', { 
-        params,
-        timeout: 120000 // 120 seconds for combined data
-      });
+      const response = await quickApi.get('/transactions/combined', { params });
       
       const data = response.data?.data || response.data;
       
       console.log('📊 Raw API Response Structure:', {
         hasSummary: !!data.summary,
         hasFinancialStats: !!data.financialStats,
-        hasEnhancedStats: !!data.enhancedStats,
-        keys: Object.keys(data),
         transactionsCount: data.transactions?.length || data.salesWithProfit?.length || 0
       });
 
@@ -1821,71 +2066,130 @@ export const unifiedAPI = {
       const shops = data.shops || data.comprehensiveData?.shops || [];
       const cashiers = data.cashiers || data.comprehensiveData?.cashiers || [];
 
-      // Calculate basic metrics for fallback
-      const creditTransactions = transactions.filter(t => 
-        t.paymentMethod === 'credit' || t.isCreditTransaction === true
-      );
-      
-      const totalCreditSales = creditTransactions.reduce((sum, t) => sum + SafeCalculationUtils.safeNumber(t.totalAmount), 0);
-      const recognizedCreditRevenue = creditTransactions.reduce((sum, t) => sum + SafeCalculationUtils.safeNumber(t.recognizedRevenue), 0);
-      const outstandingCredit = creditTransactions.reduce((sum, t) => sum + SafeCalculationUtils.safeNumber(t.outstandingRevenue), 0);
+      // ENHANCED: Normalize credit data for consistency
+      const normalizedCredits = credits.map(credit => ({
+        ...credit,
+        // Ensure consistent field names and calculations
+        totalAmount: CalculationUtils.safeNumber(credit.totalAmount),
+        amountPaid: CalculationUtils.safeNumber(credit.amountPaid),
+        balanceDue: CalculationUtils.safeNumber(credit.balanceDue) || 
+                   Math.max(0, CalculationUtils.safeNumber(credit.totalAmount) - CalculationUtils.safeNumber(credit.amountPaid)),
+        // Normalize status
+        status: credit.status || 'pending',
+        // Ensure consistent customer information
+        customerName: credit.customerName || 'Unknown Customer',
+        customerPhone: credit.customerPhone || '',
+        // Normalize shop information
+        shopName: credit.shopName || (credit.shop && typeof credit.shop === 'object' ? credit.shop.name : 'Unknown Shop'),
+        shopId: credit.shopId || (credit.shop && typeof credit.shop === 'object' ? credit.shop._id : null),
+        // Normalize cashier information
+        cashierName: credit.cashierName || 'Unknown Cashier',
+        cashierId: credit.cashierId || null
+      }));
+
+      // ENHANCED: Normalize transaction data for consistency
+      const normalizedTransactions = transactions.map(transaction => {
+        const isCredit = transaction.paymentMethod === 'credit' || 
+                        transaction.isCreditTransaction === true ||
+                        transaction.status === 'credit';
+        
+        // Calculate consistent credit metrics
+        const totalAmount = CalculationUtils.safeNumber(transaction.totalAmount);
+        const amountPaid = CalculationUtils.safeNumber(transaction.amountPaid);
+        const recognizedRevenue = CalculationUtils.safeNumber(transaction.recognizedRevenue);
+        const outstandingRevenue = CalculationUtils.safeNumber(transaction.outstandingRevenue);
+        
+        let normalizedCreditData = {};
+        
+        if (isCredit) {
+          // Ensure consistent credit calculations
+          const calculatedAmountPaid = amountPaid || recognizedRevenue || 0;
+          const calculatedOutstanding = outstandingRevenue || Math.max(0, totalAmount - calculatedAmountPaid);
+          const calculatedRecognized = recognizedRevenue || calculatedAmountPaid;
+          
+          // Calculate credit status
+          let creditStatus = transaction.creditStatus;
+          if (!creditStatus) {
+            if (calculatedOutstanding <= 0) {
+              creditStatus = 'paid';
+            } else if (calculatedAmountPaid > 0) {
+              creditStatus = 'partially_paid';
+            } else {
+              creditStatus = 'pending';
+            }
+            
+            // Check if overdue
+            if (transaction.dueDate && new Date(transaction.dueDate) < new Date() && calculatedOutstanding > 0) {
+              creditStatus = 'overdue';
+            }
+          }
+          
+          normalizedCreditData = {
+            isCreditTransaction: true,
+            amountPaid: calculatedAmountPaid,
+            recognizedRevenue: calculatedRecognized,
+            outstandingRevenue: calculatedOutstanding,
+            creditStatus: creditStatus,
+            collectionRate: totalAmount > 0 ? (calculatedRecognized / totalAmount) * 100 : 0
+          };
+        } else {
+          normalizedCreditData = {
+            isCreditTransaction: false,
+            amountPaid: totalAmount,
+            recognizedRevenue: totalAmount,
+            outstandingRevenue: 0,
+            creditStatus: null,
+            collectionRate: 100
+          };
+        }
+        
+        return {
+          ...transaction,
+          // Normalize core financial data
+          totalAmount: totalAmount,
+          cost: CalculationUtils.safeNumber(transaction.cost),
+          profit: CalculationUtils.safeNumber(transaction.profit),
+          profitMargin: CalculationUtils.safeNumber(transaction.profitMargin),
+          // Add normalized credit data
+          ...normalizedCreditData,
+          // Normalize display data
+          displayDate: transaction.displayDate || 
+                      new Date(transaction.saleDate || transaction.createdAt).toLocaleString('en-KE'),
+          // Normalize shop information
+          shopName: transaction.shopName || 
+                   (transaction.shop && typeof transaction.shop === 'object' ? transaction.shop.name : 'Unknown Shop'),
+          // Normalize cashier information
+          cashierName: transaction.cashierName || 'Unknown Cashier'
+        };
+      });
+
+      console.log('📈 Normalized data counts:', {
+        transactions: normalizedTransactions.length,
+        creditTransactions: normalizedTransactions.filter(t => t.isCreditTransaction).length,
+        expenses: expenses.length,
+        credits: normalizedCredits.length
+      });
 
       // Enhanced data structure with consistent calculations
       const enhancedData = {
         // Core normalized data arrays
-        transactions: transactions,
-        salesWithProfit: transactions,
-        filteredTransactions: transactions,
+        transactions: normalizedTransactions,
+        salesWithProfit: normalizedTransactions,
+        filteredTransactions: normalizedTransactions,
         expenses: expenses,
-        credits: credits,
+        credits: normalizedCredits,
         products: products,
         shops: shops,
         cashiers: cashiers,
         
         // Enhanced statistics and summaries
-        summary: data.summary || getDefaultStats(),
-        
-        financialStats: data.financialStats || data.summary || getDefaultStats(),
-        
+        summary: data.summary || CalculationUtils.getDefaultStats(),
+        financialStats: data.financialStats || data.summary || CalculationUtils.getDefaultStats(),
         enhancedStats: data.enhancedStats || {
-          salesWithProfit: transactions,
-          financialStats: data.summary || data.financialStats || getDefaultStats()
-        },
-        
-        comprehensiveData: data.comprehensiveData || {
-          transactions: transactions,
-          expenses: expenses,
-          products: products,
-          credits: credits,
-          summary: data.summary || getDefaultStats()
-        },
-        
-        // Performance data
-        performance: data.performance || {
-          topProducts: [],
-          shopPerformance: [],
-          topCashiers: []
-        },
-        
-        // Add consistency metadata
-        _metadata: {
-          processedAt: new Date().toISOString(),
-          dataConsistency: {
-            creditTransactionsFromTransactions: creditTransactions.length,
-            creditsFromCredits: credits.length,
-            totalCreditSalesFromTransactions: totalCreditSales,
-            outstandingFromTransactions: outstandingCredit,
-            consistencyScore: 'CALCULATED'
-          },
-          normalizationApplied: true
+          salesWithProfit: normalizedTransactions,
+          financialStats: data.summary || data.financialStats || CalculationUtils.getDefaultStats()
         }
       };
-
-      console.log('✅ Enhanced data structure created:', {
-        transactionsCount: enhancedData.transactions.length,
-        creditTransactions: creditTransactions.length,
-        creditsCount: credits.length
-      });
 
       cache.set(cacheKey, enhancedData);
       console.log('✅ Combined transactions data received and enhanced');
@@ -1903,30 +2207,11 @@ export const unifiedAPI = {
         products: [],
         expenses: [],
         credits: [],
-        summary: getDefaultStats(),
-        financialStats: getDefaultStats(),
+        summary: CalculationUtils.getDefaultStats(),
+        financialStats: CalculationUtils.getDefaultStats(),
         enhancedStats: {
           salesWithProfit: [],
-          financialStats: getDefaultStats()
-        },
-        comprehensiveData: {
-          transactions: [],
-          expenses: [],
-          products: [],
-          credits: [],
-          summary: getDefaultStats()
-        },
-        _metadata: {
-          processedAt: new Date().toISOString(),
-          dataConsistency: {
-            creditTransactionsFromTransactions: 0,
-            creditsFromCredits: 0,
-            totalCreditSalesFromTransactions: 0,
-            outstandingFromTransactions: 0,
-            consistencyScore: 'N/A (Fallback)'
-          },
-          normalizationApplied: false,
-          error: true
+          financialStats: CalculationUtils.getDefaultStats()
         },
         error: handleApiError(error)
       };
@@ -1936,45 +2221,32 @@ export const unifiedAPI = {
     }
   },
 
-  // ENHANCED: Create transaction with stock reduction and credit normalization - UPDATED WITH LONGER TIMEOUT
+  // Optimized transaction creation
   createTransaction: async (transactionData) => {
     try {
-      console.log('💰 Creating transaction with stock reduction and credit partial payment support:', transactionData);
+      console.log('💰 Creating transaction with stock reduction and credit partial payment support...');
       
-      // NEW: Add amountPaidNow for credit transactions to align with server expectations
+      // Add amountPaidNow for credit transactions to align with server expectations
       if (transactionData.paymentMethod === 'credit') {
         transactionData.amountPaidNow = transactionData.amountPaid;
         console.log('💳 Credit transaction - setting amountPaidNow:', transactionData.amountPaidNow);
       }
 
-      // UPDATED: Use longer timeout specifically for transaction creation
-      const response = await api.post('/transactions', transactionData, {
-        timeout: 120000 // 120 seconds for transaction creation
-      });
+      const response = await quickApi.post('/transactions', transactionData);
       cache.clearAll();
       
       console.log('✅ Transaction created successfully with stock reduction and credit support');
       return response.data?.data || response.data;
     } catch (error) {
       console.error('❌ Error creating transaction:', error);
-      
-      // Enhanced error logging for debugging
-      console.error('Transaction data that failed:', transactionData);
-      console.error('Full error response:', error.response?.data);
-      
-      // NEW: Specific timeout error handling
-      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-        throw new Error('Transaction request timed out. The server is taking too long to process. Please try again.');
-      }
-      
       throw new Error(handleApiError(error));
     }
   },
 
-  // ENHANCED: Combined reports with credit normalization
+  // Optimized combined reports
   getCombinedReports: async (params = {}) => {
     try {
-      console.log('📊 Generating combined reports...', params);
+      console.log('📊 Generating combined reports with optimized timeout...');
       
       const cacheKey = `combined_reports_${JSON.stringify(params)}`;
       const cached = cache.get(cacheKey);
@@ -1992,14 +2264,6 @@ export const unifiedAPI = {
           financialStats: transactionsData.financialStats,
           topProducts: transactionsData.performance?.topProducts || [],
           topCashiers: transactionsData.performance?.topCashiers || []
-        },
-        productPerformance: transactionsData.productPerformance || {
-          products: transactionsData.products,
-          summary: {}
-        },
-        cashierPerformance: transactionsData.cashierPerformance || {
-          cashiers: transactionsData.cashiers,
-          summary: {}
         },
         comprehensiveReport: transactionsData.comprehensiveReport || {
           summary: transactionsData.financialStats,
@@ -2025,20 +2289,12 @@ export const unifiedAPI = {
       
       return {
         salesSummary: {
-          financialStats: getDefaultStats(),
+          financialStats: CalculationUtils.getDefaultStats(),
           topProducts: [],
           topCashiers: []
         },
-        productPerformance: {
-          products: [],
-          summary: {}
-        },
-        cashierPerformance: {
-          cashiers: [],
-          summary: {}
-        },
         comprehensiveReport: {
-          summary: getDefaultStats(),
+          summary: CalculationUtils.getDefaultStats(),
           transactions: [],
           expenses: [],
           products: [],
@@ -2049,10 +2305,75 @@ export const unifiedAPI = {
     }
   },
 
-  // NEW: Get specific transaction metrics (12 metrics as shown in image)
+  // Optimized credit analysis
+  getCombinedCreditAnalysis: async (params = {}) => {
+    try {
+      console.log('💳 Fetching combined credit analysis with optimized timeout...');
+      
+      const cacheKey = `credit_analysis_${JSON.stringify(params)}`;
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        console.log('✅ Using cached credit analysis');
+        return cached;
+      }
+      
+      // Get normalized data from unified endpoint
+      const transactionsData = await unifiedAPI.getCombinedTransactions(params);
+      
+      // Use the already normalized data
+      const creditTransactions = transactionsData.transactions?.filter(t => t.isCreditTransaction) || [];
+      const credits = transactionsData.credits || [];
+      
+      // Calculate metrics using normalized data
+      const totalCreditSales = transactionsData.financialStats?.creditSales || 
+                              creditTransactions.reduce((sum, t) => sum + (t.totalAmount || 0), 0);
+      
+      const recognizedCreditRevenue = transactionsData.financialStats?.recognizedCreditRevenue ||
+                                    creditTransactions.reduce((sum, t) => sum + (t.recognizedRevenue || 0), 0);
+      
+      const outstandingCredit = transactionsData.financialStats?.outstandingCredit ||
+                              creditTransactions.reduce((sum, t) => sum + (t.outstandingRevenue || 0), 0);
+      
+      // Enhanced credit analysis structure with consistent data
+      const enhancedAnalysis = {
+        // Core metrics using normalized data
+        totalCreditSales: parseFloat(totalCreditSales.toFixed(2)),
+        outstandingCredit: parseFloat(outstandingCredit.toFixed(2)),
+        recognizedCreditRevenue: parseFloat(recognizedCreditRevenue.toFixed(2)),
+        creditSalesCount: Math.max(creditTransactions.length, credits.length),
+        creditCollectionRate: totalCreditSales > 0 ? 
+          parseFloat(((totalCreditSales - outstandingCredit) / totalCreditSales) * 100).toFixed(2) : 0
+      };
+      
+      cache.set(cacheKey, enhancedAnalysis);
+      console.log('✅ Combined credit analysis calculated');
+      return enhancedAnalysis;
+    } catch (error) {
+      console.error('❌ Error in credit analysis calculation:', error);
+      
+      const cacheKey = `credit_analysis_${JSON.stringify(params)}`;
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        console.log('🔄 Using stale cached analysis due to error');
+        return cached;
+      }
+      
+      // Return comprehensive fallback data
+      return {
+        totalCreditSales: 0,
+        outstandingCredit: 0,
+        recognizedCreditRevenue: 0,
+        creditSalesCount: 0,
+        creditCollectionRate: 0,
+        error: handleApiError(error)
+      };
+    }
+  },
+
+  // Optimized transaction metrics
   getTransactionMetrics: async (params = {}) => {
     try {
-      console.log('📈 Fetching specific transaction metrics...', params);
+      console.log('📈 Fetching specific transaction metrics with optimized timeout...');
       
       const cacheKey = `transaction_metrics_${JSON.stringify(params)}`;
       const cached = cache.get(cacheKey);
@@ -2061,10 +2382,7 @@ export const unifiedAPI = {
         return cached;
       }
 
-      const response = await api.get('/transactions/metrics', { 
-        params,
-        timeout: 90000 
-      });
+      const response = await quickApi.get('/transactions/metrics', { params });
       const metrics = response.data?.data || response.data;
       
       cache.set(cacheKey, metrics);
@@ -2092,10 +2410,10 @@ export const unifiedAPI = {
     }
   },
 
-  // NEW: Get cashier-specific dashboard metrics
+  // Optimized cashier dashboard metrics
   getCashierDashboardMetrics: async (params = {}) => {
     try {
-      console.log('👤 Fetching cashier-specific dashboard metrics...', params);
+      console.log('👤 Fetching cashier-specific dashboard metrics with optimized timeout...');
       
       const cacheKey = `cashier_metrics_${JSON.stringify(params)}`;
       const cached = cache.get(cacheKey);
@@ -2104,10 +2422,7 @@ export const unifiedAPI = {
         return cached;
       }
 
-      const response = await api.get('/cashier/dashboard-metrics', { 
-        params,
-        timeout: 90000 
-      });
+      const response = await quickApi.get('/cashier/dashboard-metrics', { params });
       const metrics = response.data?.data || response.data;
       
       cache.set(cacheKey, metrics);
@@ -2140,257 +2455,13 @@ export const unifiedAPI = {
   }
 };
 
-// ==================== LEGACY API COMPATIBILITY ====================
+// ==================== OPTIMIZED BASIC CRUD APIs ====================
 
-export const transactionAPI = {
-  // Basic CRUD operations
-  // UPDATED: Enhanced create method with longer timeout and better error handling
-  create: async (transactionData) => {
-    try {
-      console.log('💰 Creating transaction:', transactionData);
-      
-      // SPECIAL HANDLING FOR CREDIT PAYMENTS
-      if (transactionData.isCreditPayment) {
-        console.log('💳 Processing credit payment transaction');
-        // Ensure credit payments have the right structure
-        transactionData.transactionType = 'credit_payment';
-        transactionData.paymentStatus = 'completed';
-        
-        // Ensure items array is properly formatted
-        if (transactionData.items && transactionData.items.length > 0) {
-          transactionData.items = transactionData.items.map(item => ({
-            ...item,
-            productId: item.productId || null,
-            productName: item.productName || `Credit Payment`,
-            quantity: item.quantity || 1,
-            price: item.price || transactionData.totalAmount,
-            totalPrice: item.totalPrice || transactionData.totalAmount,
-            buyingPrice: item.buyingPrice || 0
-          }));
-        }
-      }
-
-      // UPDATED: Use longer timeout specifically for transaction creation
-      const response = await api.post('/transactions', transactionData, {
-        timeout: 120000 // 120 seconds for transaction creation
-      });
-      cache.clearAll();
-      console.log('✅ Transaction created successfully');
-      return response.data?.data || response.data;
-    } catch (error) {
-      console.error('❌ Error creating transaction:', error);
-      
-      // Enhanced error logging for debugging
-      console.error('Transaction data that failed:', transactionData);
-      console.error('Full error response:', error.response?.data);
-      
-      // NEW: Specific timeout error handling
-      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-        throw new Error('Transaction request timed out. The server is taking too long to process. Please try again.');
-      }
-      
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  getAll: async (params = {}) => {
-    const data = await unifiedAPI.getCombinedTransactions(params);
-    return data.transactions || [];
-  },
-
-  getById: async (id) => {
-    try {
-      // Handle case where id might be an object instead of string
-      const transactionId = typeof id === 'object' ? id._id || id.id || id.transactionId : id;
-      
-      if (!transactionId) {
-        throw new Error('Invalid transaction ID');
-      }
-      
-      const response = await api.get(`/transactions/${transactionId}`, {
-        timeout: 60000
-      });
-      return response.data?.data || response.data;
-    } catch (error) {
-      console.error('Error fetching transaction:', error);
-      // Don't throw error for transaction details to prevent breaking the credits list
-      return null;
-    }
-  },
-
-  update: async (id, data) => {
-    try {
-      const response = await api.put(`/transactions/${id}`, data, {
-        timeout: 90000
-      });
-      cache.clearAll();
-      return response.data?.data || response.data;
-    } catch (error) {
-      console.error('Error updating transaction:', error);
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  delete: async (id) => {
-    try {
-      const response = await api.delete(`/transactions/${id}`, {
-        timeout: 60000
-      });
-      cache.clearAll();
-      return response.data?.data || response.data;
-    } catch (error) {
-      console.error('Error deleting transaction:', error);
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  // Legacy endpoints routed to unified API
-  getOptimizedReports: async (filters = {}) => {
-    return unifiedAPI.getCombinedTransactions({ ...filters, dataType: 'optimized' });
-  },
-
-  getFinancialAnalysis: async (params = {}) => {
-    const data = await unifiedAPI.getCombinedTransactions(params);
-    return {
-      ...data.summary
-    };
-  },
-
-  getCreditAnalysis: async (params = {}) => {
-    const data = await unifiedAPI.getCombinedTransactions(params);
-    return data.summary || getDefaultStats();
-  },
-
-  // NEW: Get specific metrics endpoint
-  getMetrics: async (params = {}) => {
-    return unifiedAPI.getTransactionMetrics(params);
-  }
-};
-
-export const creditAPI = {
-  // Basic CRUD operations
-  create: async (creditData) => {
-    try {
-      console.log('💳 Creating credit record:', creditData);
-      
-      // Ensure we have the required fields
-      if (!creditData.transactionId) {
-        throw new Error('Transaction ID is required for credit record');
-      }
-      
-      if (!creditData.customerName) {
-        throw new Error('Customer name is required for credit record');
-      }
-      
-      const response = await api.post('/credits', creditData, {
-        timeout: 90000
-      });
-      cache.clearAll();
-      console.log('✅ Credit record created successfully');
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error creating credit record:', error);
-      
-      // Enhanced error handling
-      let errorMessage = handleApiError(error);
-      
-      if (error.message.includes('Transaction ID')) {
-        errorMessage = error.message;
-      } else if (error.response?.status === 404) {
-        errorMessage = 'Credit creation endpoint not found. Please check if the backend server is running.';
-      } else if (error.response?.status === 400) {
-        errorMessage = error.response.data?.message || 'Invalid credit data provided';
-      }
-      
-      throw new Error(errorMessage);
-    }
-  },
-
-  getAll: async (params = {}) => {
-    try {
-      const response = await api.get('/credits', { 
-        params,
-        timeout: 90000 
-      });
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error fetching credits:', error);
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  getById: async (id) => {
-    try {
-      const response = await api.get(`/credits/${id}`, {
-        timeout: 60000
-      });
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error fetching credit:', error);
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  update: async (id, updateData) => {
-    try {
-      const response = await api.put(`/credits/${id}`, updateData, {
-        timeout: 90000
-      });
-      cache.clearAll();
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error updating credit:', error);
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  delete: async (id) => {
-    try {
-      const response = await api.delete(`/credits/${id}`, {
-        timeout: 60000
-      });
-      cache.clearAll();
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error deleting credit:', error);
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  // Payment operations
-  patchPayment: async (id, paymentData) => {
-    try {
-      const response = await api.patch(`/credits/${id}/payment`, paymentData, {
-        timeout: 90000
-      });
-      cache.clearAll();
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error recording payment:', error);
-      throw new Error(handleApiError(error));
-    }
-  },
-
-  getPaymentHistory: async (creditId) => {
-    try {
-      const response = await api.get(`/credits/${creditId}/payment-history`, {
-        timeout: 60000
-      });
-      return response.data;
-    } catch (error) {
-      console.error('❌ Error fetching payment history:', error);
-      throw new Error(handleApiError(error));
-    }
-  }
-};
-
-// ==================== BASIC CRUD APIs ====================
-
-// Basic CRUD APIs (products, shops, cashiers, expenses)
+// Generic factory for basic CRUD operations with optimized timeouts
 const createBasicAPI = (endpoint) => ({
   getAll: async (params = {}) => {
     try {
-      console.log(`📋 Fetching ${endpoint} with params:`, params);
+      console.log(`📋 Fetching ${endpoint} with optimized timeout...`);
       
       const cacheKey = `${endpoint}_${JSON.stringify(params)}`;
       const cached = cache.get(cacheKey);
@@ -2399,10 +2470,7 @@ const createBasicAPI = (endpoint) => ({
         return cached;
       }
 
-      const response = await api.get(`/${endpoint}`, { 
-        params,
-        timeout: 90000 
-      });
+      const response = await fastApi.get(`/${endpoint}`, { params });
       const data = response.data?.data || response.data;
       const items = Array.isArray(data) ? data : [];
 
@@ -2428,9 +2496,7 @@ const createBasicAPI = (endpoint) => ({
   getById: async (id) => {
     try {
       console.log(`🔍 Fetching ${endpoint} by ID:`, id);
-      const response = await api.get(`/${endpoint}/${id}`, {
-        timeout: 60000
-      });
+      const response = await api.get(`/${endpoint}/${id}`);
       console.log(`✅ ${endpoint} fetched successfully`);
       return response.data?.data || response.data;
     } catch (error) {
@@ -2448,9 +2514,7 @@ const createBasicAPI = (endpoint) => ({
   create: async (data) => {
     try {
       console.log(`🆕 Creating ${endpoint}:`, data);
-      const response = await api.post(`/${endpoint}`, data, {
-        timeout: 90000
-      });
+      const response = await quickApi.post(`/${endpoint}`, data);
       cache.clearAll();
       console.log(`✅ ${endpoint} created successfully`);
       return response.data?.data || response.data;
@@ -2473,9 +2537,7 @@ const createBasicAPI = (endpoint) => ({
   update: async (id, data) => {
     try {
       console.log(`✏️ Updating ${endpoint} ID:`, id, 'with data:', data);
-      const response = await api.put(`/${endpoint}/${id}`, data, {
-        timeout: 90000
-      });
+      const response = await api.put(`/${endpoint}/${id}`, data);
       cache.clearAll();
       console.log(`✅ ${endpoint} updated successfully`);
       return response.data?.data || response.data;
@@ -2494,9 +2556,7 @@ const createBasicAPI = (endpoint) => ({
   delete: async (id) => {
     try {
       console.log(`🗑️ Deleting ${endpoint} ID:`, id);
-      const response = await api.delete(`/${endpoint}/${id}`, {
-        timeout: 60000
-      });
+      const response = await api.delete(`/${endpoint}/${id}`);
       cache.clearAll();
       console.log(`✅ ${endpoint} deleted successfully`);
       return response.data?.data || response.data;
@@ -2525,11 +2585,8 @@ export const expenseAPI = {
   
   getStats: async (params = {}) => {
     try {
-      console.log('📊 Fetching expense stats with params:', params);
-      const response = await api.get('/expenses/stats/overview', { 
-        params,
-        timeout: 90000 
-      });
+      console.log('📊 Fetching expense stats with optimized timeout...');
+      const response = await quickApi.get('/expenses/stats/overview', { params });
       console.log('✅ Expense stats fetched successfully');
       return response.data?.data || response.data;
     } catch (error) {
@@ -2560,10 +2617,9 @@ export const expenseAPI = {
 
   getByDateRange: async (startDate, endDate) => {
     try {
-      console.log('📅 Fetching expenses by date range:', { startDate, endDate });
-      const response = await api.get('/expenses', {
-        params: { startDate, endDate },
-        timeout: 90000
+      console.log('📅 Fetching expenses by date range with optimized timeout...');
+      const response = await quickApi.get('/expenses', {
+        params: { startDate, endDate }
       });
       const data = response.data?.data || response.data;
       console.log('✅ Date range expenses fetched successfully:', data?.length || 0, 'items');
@@ -2572,20 +2628,216 @@ export const expenseAPI = {
       console.error('❌ Error fetching expenses by date range:', error);
       return [];
     }
+  }
+};
+
+// ==================== OPTIMIZED REPORT API SERVICE ====================
+
+export const reportAPI = {
+  getDashboardData: async (filters = {}) => {
+    try {
+      console.log('📈 Fetching complete dashboard data with optimized timeout...');
+      
+      const [transactionsData, creditAnalysis] = await Promise.all([
+        unifiedAPI.getCombinedTransactions(filters),
+        unifiedAPI.getCombinedCreditAnalysis(filters)
+      ]);
+      
+      const dashboardData = {
+        ...transactionsData,
+        creditAnalysis,
+        creditStats: creditAnalysis.summary,
+        loadedAt: new Date().toISOString(),
+        dataSources: {
+          transactions: transactionsData.transactions?.length || 0,
+          shops: transactionsData.shops?.length || 0,
+          cashiers: transactionsData.cashiers?.length || 0,
+          products: transactionsData.products?.length || 0,
+          credits: creditAnalysis.credits?.length || 0,
+          expenses: transactionsData.expenses?.length || 0
+        }
+      };
+      
+      console.log('✅ Enhanced dashboard data loaded successfully');
+      return dashboardData;
+    } catch (error) {
+      console.error('❌ Error loading enhanced dashboard data:', error);
+      
+      // Try to provide partial data if possible
+      try {
+        const transactionsData = await unifiedAPI.getCombinedTransactions(filters);
+        const creditAnalysis = await unifiedAPI.getCombinedCreditAnalysis(filters);
+        
+        return {
+          ...transactionsData,
+          creditAnalysis,
+          creditStats: creditAnalysis.summary,
+          loadedAt: new Date().toISOString(),
+          dataSources: {
+            transactions: transactionsData.transactions?.length || 0,
+            shops: transactionsData.shops?.length || 0,
+            cashiers: transactionsData.cashiers?.length || 0,
+            products: transactionsData.products?.length || 0,
+            credits: creditAnalysis.credits?.length || 0,
+            expenses: transactionsData.expenses?.length || 0
+          },
+          error: 'Partial data loaded due to server issues'
+        };
+      } catch (fallbackError) {
+        throw new Error(handleApiError(error));
+      }
+    }
   },
 
-  getCategories: async () => {
+  getCreditAnalysisReport: async (filters = {}) => {
+    const analysis = await unifiedAPI.getCombinedCreditAnalysis(filters);
+    return {
+      ...analysis,
+      reportGenerated: new Date().toISOString(),
+      filters,
+      summary: analysis.summary
+    };
+  },
+
+  // Optimized cashier dashboard data
+  getCashierDashboard: async (filters = {}) => {
     try {
-      console.log('📂 Fetching expense categories');
-      const response = await api.get('/expenses/categories', {
-        timeout: 60000
-      });
-      const data = response.data?.data || response.data;
-      console.log('✅ Expense categories fetched successfully:', data?.length || 0, 'categories');
-      return data;
+      console.log('👤 Fetching cashier dashboard data with optimized timeout...');
+      
+      const [metrics, transactions] = await Promise.all([
+        unifiedAPI.getCashierDashboardMetrics(filters),
+        unifiedAPI.getCombinedTransactions(filters)
+      ]);
+      
+      const dashboardData = {
+        ...metrics,
+        recentTransactions: transactions.transactions?.slice(0, 10) || [],
+        loadedAt: new Date().toISOString()
+      };
+      
+      console.log('✅ Cashier dashboard data loaded successfully');
+      return dashboardData;
     } catch (error) {
-      console.error('❌ Error fetching expense categories:', error);
-      return [];
+      console.error('❌ Error loading cashier dashboard data:', error);
+      
+      return {
+        totalSales: 0,
+        totalTransactions: 0,
+        creditSales: 0,
+        nonCreditSales: 0,
+        totalCash: 0,
+        totalMpesaBank: 0,
+        totalCredit: 0,
+        outstandingCredit: 0,
+        recentTransactions: [],
+        error: handleApiError(error)
+      };
+    }
+  }
+};
+
+// ==================== CASHIER ANALYTICS API ====================
+
+export const cashierAnalyticsAPI = {
+  // Get comprehensive cashier analytics
+  getCashierAnalytics: async (cashierId, params = {}) => {
+    try {
+      console.log('📊 Fetching cashier analytics with optimized timeout...', { cashierId, params });
+      
+      const cacheKey = `cashier_analytics_${cashierId}_${JSON.stringify(params)}`;
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        console.log('✅ Using cached cashier analytics');
+        return cached;
+      }
+
+      const response = await quickApi.get(`/cashiers/${cashierId}/analytics`, { params });
+      const analyticsData = response.data?.data || response.data;
+      
+      cache.set(cacheKey, analyticsData);
+      console.log('✅ Cashier analytics fetched successfully');
+      return analyticsData;
+    } catch (error) {
+      console.error('❌ Error fetching cashier analytics:', error);
+      
+      // Return comprehensive fallback analytics data
+      return {
+        cashier: null,
+        metrics: {
+          totalRevenue: 0,
+          totalCost: 0,
+          totalProfit: 0,
+          totalTransactions: 0,
+          totalItemsSold: 0,
+          profitMargin: 0,
+          creditSalesCount: 0,
+          totalCreditAmount: 0,
+          outstandingCredit: 0,
+          averageTransactionValue: 0,
+          creditCollectionRate: 0
+        },
+        dailyPerformance: [],
+        topProducts: [],
+        credits: [],
+        period: {
+          start: new Date().toISOString().split('T')[0],
+          end: new Date().toISOString().split('T')[0],
+          timeRange: '7d'
+        },
+        error: handleApiError(error)
+      };
+    }
+  },
+
+  // Get cashier performance summary
+  getCashierPerformance: async (cashierId, params = {}) => {
+    try {
+      console.log('📈 Fetching cashier performance summary...', { cashierId, params });
+      
+      const response = await quickApi.get(`/cashiers/${cashierId}/performance`, { params });
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('❌ Error fetching cashier performance:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  // Get cashier's recent transactions
+  getCashierTransactions: async (cashierId, params = {}) => {
+    try {
+      console.log('📋 Fetching cashier transactions...', { cashierId, params });
+      
+      const response = await quickApi.get(`/cashiers/${cashierId}/transactions`, { params });
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('❌ Error fetching cashier transactions:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  // Get cashier's credit sales
+  getCashierCredits: async (cashierId, params = {}) => {
+    try {
+      console.log('💳 Fetching cashier credits...', { cashierId, params });
+      
+      const response = await quickApi.get(`/cashiers/${cashierId}/credits`, { params });
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('❌ Error fetching cashier credits:', error);
+      throw new Error(handleApiError(error));
+    }
+  },
+
+  // Get cashiers with performance metrics
+  getCashiersWithMetrics: async (params = {}) => {
+    try {
+      console.log('👥 Fetching cashiers with metrics...', { params });
+      
+      const response = await quickApi.get('/cashiers-with-metrics', { params });
+      return response.data?.data || response.data;
+    } catch (error) {
+      console.error('❌ Error fetching cashiers with metrics:', error);
+      throw new Error(handleApiError(error));
     }
   }
 };
@@ -2604,12 +2856,20 @@ const apiService = {
   cashiers: cashierAPI,
   expenses: expenseAPI,
   credits: creditAPI,
+  reports: reportAPI,
+  cashierAnalytics: cashierAnalyticsAPI,
   
   // Utility functions
   handleApiError,
   cache,
-  getDefaultStats // Export for use in other files
+  
+  // Performance utilities
+  clearCache: () => cache.clearAll(),
+  getCacheStats: () => ({
+    size: Object.keys(cache.data).length,
+    keys: Object.keys(cache.data)
+  })
 };
 
 export default apiService;
-export { handleApiError, getDefaultStats };
+export { handleApiError };
